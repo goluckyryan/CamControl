@@ -56,6 +56,54 @@ assert_contains "$applied" "white_balance_temperature=4500" "writes the configur
 assert_not_contains "$applied" "focus_automatic_continuous" "leaves focus on auto when FIX_FOCUS is blank"
 assert_not_contains "$applied" "gain="                   "leaves gain alone when FIX_GAIN is blank"
 
+# --- an out-of-range value is a warning, not a silent clamp ----------------
+# The driver clamps without erroring and without a non-zero exit, and the
+# ranges are not even the same kind of number between cameras: white balance
+# is Kelvin (2000..6500) on a C920e but an index (1..5) on an SPL6418. A value
+# carried from one camera to the other has to be caught here or it shows up
+# only as a wrong picture.
+ctrls="$SCRATCH/ctrls.txt"
+cat > "$ctrls" <<'CTRLS'
+                     brightness 0x00980900 (int)    : min=0 max=10 step=1 default=5 value=5
+        white_balance_automatic 0x0098090c (bool)   : default=1 value=1
+      white_balance_temperature 0x0098091a (int)    : min=1 max=5 step=1 default=4 value=4
+         exposure_time_absolute 0x009a0902 (int)    : min=1 max=12287 step=1 default=78 value=350
+CTRLS
+
+camrange() {
+  (
+    source "$ROOT/lib/common.sh" >/dev/null 2>&1
+    source "$ROOT/lib/camera.sh"
+    eval "v4l2-ctl() { cat '$ctrls'; }"
+    cam_ctrl_range d "$1"
+  )
+}
+assert_eq "1 5"     "$(camrange white_balance_temperature)" "reads a control's advertised range"
+assert_eq "1 12287" "$(camrange exposure_time_absolute)"    "reads a wide range"
+assert_eq ""        "$(camrange white_balance_automatic)"   "reports no range for a bool"
+assert_eq ""        "$(camrange nosuchcontrol)"             "reports no range for a control the camera lacks"
+
+camset() {
+  (
+    source "$ROOT/lib/common.sh" >/dev/null 2>&1
+    source "$ROOT/lib/camera.sh"
+    eval "v4l2-ctl() { cat '$ctrls'; }"
+    cam_set() { printf 'set %s=%s\n' "$2" "$3"; }
+    cam_set_checked d "$1" "$2" 2>&1
+  )
+}
+in_range="$(camset white_balance_temperature 3)"
+assert_contains     "$in_range" "set white_balance_temperature=3" "writes an in-range value"
+assert_not_contains "$in_range" "warning"                         "and says nothing about it"
+
+kelvin="$(camset white_balance_temperature 4500)"
+assert_contains "$kelvin" "warning"                            "warns when Kelvin is written to an index control"
+assert_contains "$kelvin" "1..5"                               "names the range the camera really has"
+assert_contains "$kelvin" "set white_balance_temperature=4500" "still writes, so the clamp stays the driver's call"
+
+assert_not_contains "$(camset white_balance_automatic 0)" "warning" "no warning for a control with no advertised range"
+assert_not_contains "$(camset nosuchcontrol 7)"           "warning" "no warning for a control the camera lacks"
+
 # v4l2-ctl prints "1 (Manual Mode)" for some controls and a bare "2" for
 # others, so the numeric value has to be taken off the front.
 stubget() {

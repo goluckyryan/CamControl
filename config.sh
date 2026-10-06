@@ -16,9 +16,10 @@ SHOT_SETTLE_SEC=8
 
 # --- image -----------------------------------------------------------------
 # Upper bound on frame size; the largest mode the camera offers at or below
-# this is chosen automatically.
-MAX_WIDTH=1920
-MAX_HEIGHT=1080
+# this is chosen automatically, so this is a ceiling and not a demand. A 1080p
+# camera stays at 1080p with the cap set here.
+MAX_WIDTH=3840
+MAX_HEIGHT=2160
 
 # ffmpeg -q:v for the stills. 2 = best, 31 = worst.
 JPEG_QUALITY=2
@@ -33,9 +34,15 @@ DEVICE=""
 WARMUP_SEC=4
 
 # Pin a control outright instead of auto-calibrating it. Empty = calibrate.
-FIX_EXPOSURE="350"        # exposure_time_absolute, 3..2047 on a C920e
-FIX_WB=""              # white_balance_temperature, 2000..6500
-FIX_FOCUS=""           # focus_absolute, 0..250 step 5
+#
+# The ranges below are per-camera, not universal: `v4l2-ctl -d DEVICE
+# --list-ctrls-menus` prints the real ones, and a control the camera does not
+# have at all is skipped. An out-of-range value is clamped by the driver with
+# no error, so capture warns when one is written -- see cam_set_checked.
+FIX_EXPOSURE="350"     # exposure_time_absolute; 3..2047 C920e, 1..12287 SPL6418
+FIX_WB=""              # white_balance_temperature; Kelvin 2000..6500 on a
+                       # C920e, but an index 1..5 on the SPL6418 -- not Kelvin
+FIX_FOCUS=""           # focus_absolute, 0..250 step 5; absent on the SPL6418
 FIX_GAIN=""            # gain, 0..255
 
 # Digital framing, applied before warmup. Empty = leave alone.

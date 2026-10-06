@@ -80,6 +80,47 @@ cam_get() {
 
 cam_set() { v4l2-ctl -d "$1" --set-ctrl "$2=$3" >/dev/null 2>&1; }
 
+# "MIN MAX" for a control, or nothing when it advertises no range (bools, and
+# menus on some drivers). Parsed off the --list-ctrls line, e.g.
+#   exposure_time_absolute 0x009a0902 (int) : min=1 max=12287 step=1 default=78
+cam_ctrl_range() {
+  v4l2-ctl -d "$1" --list-ctrls 2>/dev/null | awk -v n="$2" '
+    $1 == n {
+      min = ""; max = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^min=/) min = substr($i, 5)
+        if ($i ~ /^max=/) max = substr($i, 5)
+      }
+      if (min != "" && max != "") print min, max
+      exit
+    }'
+}
+
+# Write a control, warning first if the camera would clamp the value.
+#
+# The driver clamps out-of-range values silently: no error, no non-zero exit,
+# just a different picture. The ranges are not even the same kind of number
+# between cameras -- white_balance_temperature is Kelvin (2000..6500) on a
+# C920e but an index (1..5) on an SPL6418, so a value carried over from one
+# camera lands on the other as 5 and nothing says so.
+#
+# Controls are written several times per shot, so the same complaint would
+# otherwise land once per write and then once per frame all session long.
+_CAM_RANGE_WARNED=""
+
+cam_set_checked() {
+  local dev="$1" name="$2" val="$3" range min max
+  range="$(cam_ctrl_range "$dev" "$name")" || true
+  if [[ -n "$range" && "$val" =~ ^-?[0-9]+$ ]]; then
+    min="${range%% *}"; max="${range##* }"
+    if (( val < min || val > max )) && [[ " $_CAM_RANGE_WARNED " != *" $name=$val "* ]]; then
+      _CAM_RANGE_WARNED+=" $name=$val"
+      warn "$name=$val is outside this camera's range ${min}..${max} and will be clamped; run 'v4l2-ctl -d $dev --list-ctrls-menus' for the real ranges"
+    fi
+  fi
+  cam_set "$dev" "$name" "$val"
+}
+
 # First control name that exists, so modern and legacy kernels both work.
 cam_pick_ctrl() {
   local dev="$1"; shift
@@ -126,22 +167,22 @@ cam_apply_fixed() {
     ctrl="$(cam_pick_ctrl "$dev" auto_exposure exposure_auto)" &&
       cam_set "$dev" "$ctrl" 1
     ctrl="$(cam_pick_ctrl "$dev" exposure_time_absolute exposure_absolute)" &&
-      cam_set "$dev" "$ctrl" "$FIX_EXPOSURE"
+      cam_set_checked "$dev" "$ctrl" "$FIX_EXPOSURE"
   fi
   if [[ -n "${FIX_WB:-}" ]]; then
     ctrl="$(cam_pick_ctrl "$dev" white_balance_automatic white_balance_temperature_auto)" &&
       cam_set "$dev" "$ctrl" 0
     cam_ctrl_exists "$dev" white_balance_temperature &&
-      cam_set "$dev" white_balance_temperature "$FIX_WB"
+      cam_set_checked "$dev" white_balance_temperature "$FIX_WB"
   fi
   if [[ -n "${FIX_FOCUS:-}" ]]; then
     ctrl="$(cam_pick_ctrl "$dev" focus_automatic_continuous focus_auto)" &&
       cam_set "$dev" "$ctrl" 0
     cam_ctrl_exists "$dev" focus_absolute &&
-      cam_set "$dev" focus_absolute "$FIX_FOCUS"
+      cam_set_checked "$dev" focus_absolute "$FIX_FOCUS"
   fi
   if [[ -n "${FIX_GAIN:-}" ]]; then
-    cam_ctrl_exists "$dev" gain && cam_set "$dev" gain "$FIX_GAIN"
+    cam_ctrl_exists "$dev" gain && cam_set_checked "$dev" gain "$FIX_GAIN"
   fi
   return 0
 }

@@ -3,8 +3,14 @@
 Time-lapse rig for watching **Helios** move: take a still every few minutes with
 fixed camera settings, then turn the stills into a movie.
 
-Built and tested on a Raspberry Pi 5 (Debian 13) with a **Logitech C920e**.
+Built and tested on a Raspberry Pi 5 (Debian 13) with a **Logitech C920e** and a
+**4K SPL6418** (a Philips 4000-series unit; it enumerates as `XIFT SPL6418`).
 Nothing needs installing — it uses ffmpeg, v4l2-ctl and Python 3, all already present.
+
+Capture resolution is not configured per camera: `MAX_WIDTH`/`MAX_HEIGHT` in
+`config.sh` are a **ceiling**, and the largest mode at or below it is chosen. The
+default is 3840x2160, so the SPL6418 shoots 4K and the C920e still shoots 1080p
+without changing anything.
 
 ## Quickstart
 
@@ -48,7 +54,35 @@ FIX_GAIN=""            # optional
 ```
 
 A blank value is left on **auto** rather than frozen, so setting only
-`FIX_EXPOSURE` pins exposure and leaves the rest alone.
+`FIX_EXPOSURE` pins exposure and leaves the rest alone — where the camera has an
+auto mode to leave it in. The SPL6418 has none for exposure: it reports
+`auto_exposure` as Manual Mode only and rejects every other setting, so on that
+camera exposure is always manual whether or not you pin it.
+
+### The ranges differ between cameras
+
+They are not even the same *kind* of number. Run
+`v4l2-ctl -d /dev/video0 --list-ctrls-menus` for the camera actually attached:
+
+| control | C920e | SPL6418 |
+|---|---|---|
+| `exposure_time_absolute` | 3..2047 | 1..12287, but only moves the image over roughly **1..30**; flat above that |
+| `white_balance_temperature` | 2000..6500, in Kelvin | **1..5, an index** — not Kelvin |
+| `focus_absolute` | 0..250 step 5 | **absent**; focus is fixed and `FIX_FOCUS` is ignored |
+| `gain` | 0..255 | 0..255 |
+| `auto_exposure` | auto or manual | **manual only** |
+
+The white balance row is the one that bites. A driver **clamps an out-of-range
+value silently** — no error, no non-zero exit — so `FIX_WB="4500"` written to an
+SPL6418 becomes `5` and shows up only as a wrong-looking picture. Capture now
+warns when it writes a value the camera will clamp:
+
+```
+warning: white_balance_temperature=4500 is outside this camera's range 1..5
+and will be clamped; run 'v4l2-ctl -d ... --list-ctrls-menus' for the real ranges
+```
+
+The value is still written — the clamp stays the driver's decision, not ours.
 
 To find a value, take single shots and look at them:
 
@@ -58,7 +92,9 @@ To find a value, take single shots and look at them:
 ```
 
 `bin/preview` is different: it stays on **auto**, to show what the camera would
-pick for itself. `-ss` shows what *you* have picked.
+pick for itself. `-ss` shows what *you* have picked. On a camera with no auto
+exposure mode, such as the SPL6418, the two differ only by the other `FIX_*`
+values — preview cannot put exposure back on auto because there is no auto.
 
 **The camera quantises exposure to its own ladder** (…156, 312, 624, 1250…) and
 snaps to the nearest rung, so asking for 700 gives 624 and 1024 gives 1250.
@@ -107,6 +143,18 @@ Storage, measured at 1080p `-q:v 2` (~180 kB per frame):
 | 30 s | 2880 | ~520 MB | ~3.6 GB | ~15 GB |
 | 5 min | 288 | ~52 MB | ~0.36 GB | ~1.6 GB |
 | 1 h | 24 | ~4 MB | ~30 MB | ~130 MB |
+
+At 4K a frame measures ~560 kB, so roughly 3x that:
+
+| interval | frames/day | per day | per week | per month |
+|---|---|---|---|---|
+| 30 s | 2880 | ~1.6 GB | ~11 GB | ~48 GB |
+| 5 min | 288 | ~160 MB | ~1.1 GB | ~4.8 GB |
+| 1 h | 24 | ~13 MB | ~94 MB | ~400 MB |
+
+A 30-second interval at 4K fills a disk in a way a 5-minute one does not; check
+`df -h` before committing to a long fast run. `MIN_FREE_MB` refuses to start
+below 2 GB free, which is a floor, not a budget for the run ahead.
 
 ## Commands
 
@@ -172,6 +220,15 @@ missing from that list it is not enumerating: check `lsusb` for it.
 **Frames too dark or too bright** — that is `FIX_EXPOSURE`. Take a `-ss` shot,
 adjust, repeat. Remember the camera snaps to its own ladder.
 
+**Changing `FIX_EXPOSURE` does nothing** — on an SPL6418 the control only moves
+the image over roughly 1..30, and is flat from there to its advertised maximum of
+12287. A value like 350 sits well inside that plateau, so large changes to it
+look like no change at all. Work in the low end.
+
+**`FIX_FOCUS` seems ignored** — the SPL6418 exposes no focus control at all, so
+there is nothing to write; `bin/cameras` and `v4l2-ctl --list-ctrls-menus` show
+what the attached camera actually has.
+
 **`misses` in `bin/status`** — a shot that produced no frame in its 8 s window,
 usually the camera being slow to start or busy. The next interval just tries
 again; `capture.log` has the ffmpeg output.
@@ -188,7 +245,8 @@ larger than 1.5x the interval, with the timestamp.
 run.sh                    front door: -t for an interval, -ss for one shot
 config.sh                 all defaults, including the FIX_* camera settings
 lib/common.sh             paths, logging, interval validation, disk guard
-lib/camera.sh             device detection, format probe, applying fixed controls
+lib/camera.sh             device detection, format probe, applying fixed controls,
+                          range-checking a value before the driver clamps it
 bin/                      the commands above
 tools/pick_format.py      choose a capture mode from the camera's advertised list
 tools/frames.py           frame listing and gap detection
@@ -208,3 +266,7 @@ attached; the camera-only checks report as skipped when it is unplugged.
 Encoding is software `libx264`: the Pi 5 has **no** hardware H.264 encoder. ffmpeg
 lists `h264_v4l2m2m`, `h264_vaapi`, `h264_nvenc` and `h264_vulkan`, but none has
 backing hardware on this board and all fail at runtime.
+
+That is slow but not prohibitive at 4K: measured ~2.6 frames/s at `crf 18 preset
+medium`, so a 288-frame day encodes in under two minutes and a 2880-frame day in
+about twenty. Drop to `--preset fast` if that matters.
