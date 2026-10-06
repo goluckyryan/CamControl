@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# Run one capture session: take a still every interval, with the fixed
+# parameters from config.sh applied to every shot.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$HELIOS_ROOT/lib/camera.sh"
+
+usage() {
+  cat <<USAGE
+usage: bin/capture [options]
+
+  -i, --interval N   seconds between frames (default ${INTERVAL_SEC}, minimum $((SHOT_SETTLE_SEC * 2)))
+  -d, --duration N   stop after N seconds (default ${DURATION_SEC:-0} = until stopped)
+      --device PATH  capture device (default: auto-detect)
+      --name NAME    session folder name (default: timestamp)
+  -b, --background   detach and return immediately
+  -h, --help         this text
+
+Every frame is taken the same way: open the camera, write the FIX_* values
+from config.sh, stream ${SHOT_SETTLE_SEC}s so they take hold, keep the last
+frame, close. No calibration, so the settings are identical on every frame of
+every run and a brightness change is the scene changing.
+
+Ctrl-C ends a foreground session cleanly. Use bin/stop for a background one.
+USAGE
+}
+
+INTERVAL="$INTERVAL_SEC"; DURATION="${DURATION_SEC:-0}"
+DEV_ARG="${DEVICE:-}"; NAME=""; BACKGROUND=0
+ORIG_ARGS=("$@")
+
+while (( $# )); do
+  case "$1" in
+    -i|--interval) INTERVAL="${2:?--interval needs a value}"; shift 2 ;;
+    -d|--duration) DURATION="${2:?--duration needs a value}"; shift 2 ;;
+    --device)      DEV_ARG="${2:?--device needs a value}"; shift 2 ;;
+    --name)        NAME="${2:?--name needs a value}"; shift 2 ;;
+    -b|--background) BACKGROUND=1; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    *) die "unknown option '$1' (try --help)" ;;
+  esac
+done
+
+need ffmpeg; need v4l2-ctl
+validate_interval "$INTERVAL"
+[[ "$DURATION" =~ ^[0-9]+$ ]] || die "duration must be a whole number of seconds, got '$DURATION'"
+
+# A name becomes a directory under sessions/ and a value in session.json, so
+# keep it to characters that cannot traverse a path or need quoting.
+if [[ -n "$NAME" ]]; then
+  [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || die "--name may contain only letters, digits, dot, dash and underscore, and must start with a letter or digit (got '$NAME')"
+fi
+
+# Each shot spends SHOT_SETTLE_SEC streaming before it keeps a frame; below
+# roughly twice that, the camera would never be switched off.
+if fcmp "$INTERVAL" lt "$((SHOT_SETTLE_SEC * 2))"; then
+  die "interval must be at least $((SHOT_SETTLE_SEC * 2))s (each shot streams ${SHOT_SETTLE_SEC}s so the fixed exposure takes hold); got ${INTERVAL}s"
+fi
+
+# What will be written to the camera on every shot, straight from config.sh.
+FIXED_SUMMARY=""
+for _kv in "exposure=${FIX_EXPOSURE:-}" "wb=${FIX_WB:-}" "focus=${FIX_FOCUS:-}" "gain=${FIX_GAIN:-}"; do
+  [[ -n "${_kv#*=}" ]] && FIXED_SUMMARY+="${FIXED_SUMMARY:+  }${_kv}"
+done
+[[ -n "$FIXED_SUMMARY" ]] || warn "no FIX_* values in config.sh: the camera will meter every shot itself, so brightness will vary frame to frame. Set FIX_EXPOSURE to hold it steady."
+
+# Detach by re-execing ourselves, then wait for the child to publish its session.
+if (( BACKGROUND )) && [[ -z "${HELIOS_DETACHED:-}" ]]; then
+  before="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+  HELIOS_DETACHED=1 setsid nohup "$0" "${ORIG_ARGS[@]}" >/dev/null 2>&1 &
+  for _ in $(seq 1 50); do
+    now="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ -n "$now" && "$now" != "$before" ]] && { ok "started in background: $now"; exit 0; }
+    sleep 0.2
+  done
+  die "background session did not start; check the newest folder under sessions/"
+fi
+
+# --- device and mode -------------------------------------------------------
+if [[ -n "$DEV_ARG" ]]; then
+  [[ -c "$DEV_ARG" ]] || die "'$DEV_ARG' is not a character device"
+  DEV="$DEV_ARG"
+else
+  DEV="$(cam_detect || true)"
+  [[ -n "$DEV" ]] || die "no usable capture device found (run bin/cameras to see why)"
+fi
+DEV="$(cam_stable_path "$DEV")"
+CARD="$(cam_card "$DEV")"
+
+# A shot streams for a few seconds regardless of the interval, so the capture
+# rate only needs to be the lowest the camera offers.
+read -r FMT W H CAPFPS < <(cam_formats "$DEV" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" 1) \
+  || die "could not determine a capture mode for $DEV"
+
+case "$FMT" in
+  MJPG) IFMT=mjpeg ;;
+  YUYV|YUY2) IFMT=yuyv422 ;;
+  *) IFMT="$(printf '%s' "$FMT" | tr '[:upper:]' '[:lower:]')" ;;
+esac
+
+# --- session ---------------------------------------------------------------
+mkdir -p "$SESSIONS_DIR"
+check_space "$SESSIONS_DIR"
+
+SID="${NAME:-$(date '+%Y-%m-%d_%H%M%S')}"
+SDIR="$SESSIONS_DIR/$SID"
+[[ -e "$SDIR" ]] && die "session '$SID' already exists"
+FRAMES="$SDIR/frames"
+LOG="$SDIR/capture.log"
+META="$SDIR/session.json"
+mkdir -p "$FRAMES"
+# A detached run has nowhere to print, so give it a log before it says anything.
+[[ -n "${HELIOS_DETACHED:-}" ]] && exec >>"$SDIR/supervisor.log" 2>&1
+
+info "session   : $SID"
+info "device    : $DEV  ($CARD)"
+info "mode      : $FMT ${W}x${H} @ ${CAPFPS} fps, ${SHOT_SETTLE_SEC}s per shot"
+info "fixed     : ${FIXED_SUMMARY:-none — camera meters each shot}"
+info "interval  : ${INTERVAL}s$( [[ "$DURATION" != 0 ]] && printf ', stopping after %ss' "$DURATION" )"
+info "frames    : $FRAMES"
+
+# --- lifecycle -------------------------------------------------------------
+STOP=0; FFPID=""; TIMER=""; SLEEPPID=""; SHOTS=0; MISSES=0; SESSION_LIVE=0
+
+on_signal() {
+  STOP=1
+  [[ -n "$FFPID" ]] && kill -TERM "$FFPID" 2>/dev/null || true
+  [[ -n "$SLEEPPID" ]] && kill -TERM "$SLEEPPID" 2>/dev/null || true
+}
+trap on_signal INT TERM
+
+finalize() {
+  trap - INT TERM EXIT
+  [[ -n "$TIMER" ]] && kill "$TIMER" 2>/dev/null || true
+  [[ -n "$SLEEPPID" ]] && kill "$SLEEPPID" 2>/dev/null || true
+  [[ -n "$FFPID" ]] && kill -TERM "$FFPID" 2>/dev/null || true
+  wait 2>/dev/null || true
+  rm -f "$SDIR/capture.pid" "$SDIR/.shot.jpg"
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$SDIR" ]] && rm -f "$CURRENT_LINK"
+  if (( SESSION_LIVE == 0 )); then
+    # Setup failed before capture began. Take the empty shell of a session with
+    # us rather than leave a half-built folder for resolve_session to pick as
+    # "newest" later; rmdir only succeeds while it really is empty.
+    rmdir "$FRAMES" "$SDIR" 2>/dev/null || true
+    return
+  fi
+  if [[ -f "$META" ]]; then
+    python3 "$HELIOS_ROOT/tools/session_update.py" "$META" \
+      --set "ended=$(date '+%Y-%m-%d %H:%M:%S')" \
+      --set "misses=$MISSES" \
+      --controls "$SDIR/controls.json" --report || true
+  fi
+  local n; n="$(find "$FRAMES" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)"
+  ok "stopped: $n frame(s) in $SDIR"
+  echo "next: bin/make-movie $SID" >&2
+}
+trap finalize EXIT
+
+ln -sfn "$SDIR" "$CURRENT_LINK"
+echo $$ > "$SDIR/capture.pid"
+
+# Values go in as arguments, never interpolated into the program text: a card
+# string or session name holding a quote would otherwise be a syntax error.
+python3 - "$META" "$SID" "$DEV" "$CARD" "$FMT" "$W" "$H" "$CAPFPS" \
+                  "$INTERVAL" "$DURATION" "$JPEG_QUALITY" <<'PY' || die "could not write $META"
+import json, sys, datetime
+
+path, sid, dev, card, fmt, w, h, capfps, iv, dur, q = sys.argv[1:12]
+
+
+def num(s):
+    """Keep whole numbers whole, so session.json reads 300 and not 300.0."""
+    f = float(s)
+    return int(f) if f.is_integer() else f
+
+
+json.dump({
+  "id": sid,
+  "device": dev,
+  "card": card,
+  "format": fmt,
+  "width": int(w), "height": int(h),
+  "capture_fps": num(capfps),
+  "interval_sec": num(iv),
+  "duration_sec": int(dur),
+  "jpeg_quality": int(q),
+  "started": datetime.datetime.now().isoformat(sep=" ", timespec="seconds"),
+  "ended": None, "frames": 0, "misses": 0, "controls": {}, "gaps": [],
+}, open(path, "w"), indent=2, sort_keys=True)
+PY
+
+# Record what the session was configured with, for reference later.
+write_fixed_controls() {
+  python3 - "$SDIR/controls.json" \
+    "exposure_time_absolute=${FIX_EXPOSURE:-}" \
+    "white_balance_temperature=${FIX_WB:-}" \
+    "focus_absolute=${FIX_FOCUS:-}" \
+    "gain=${FIX_GAIN:-}" \
+    "power_line_frequency=${POWER_LINE_FREQ:-}" \
+    "zoom_absolute=${ZOOM:-}" \
+    "pan_absolute=${PAN:-}" \
+    "tilt_absolute=${TILT:-}" <<'PY'
+import json, sys
+out = {}
+for arg in sys.argv[2:]:
+    k, _, v = arg.partition("=")
+    if v == "":
+        continue                      # not configured: left on auto
+    try:
+        out[k] = int(v)
+    except ValueError:
+        out[k] = v
+json.dump(out, open(sys.argv[1], "w"), indent=2, sort_keys=True)
+PY
+}
+
+# One still: open the camera, write the fixed values once the stream is up,
+# keep the last frame. -update 1 overwrites the same file on every frame, so
+# what survives is a frame taken after the values have taken hold.
+take_shot() {
+  local out="$1" tmp="$SDIR/.shot.jpg" i
+  rm -f "$tmp"
+  ffmpeg -nostdin -loglevel error -y \
+    -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
+    -i "$DEV" -t "$SHOT_SETTLE_SEC" -update 1 -q:v "$JPEG_QUALITY" \
+    "$tmp" >> "$LOG" 2>&1 &
+  FFPID=$!
+
+  # Controls written to an idle device are discarded: the camera re-meters on
+  # every stream open. They have to go in after the stream is up. Written more
+  # than once because how soon the camera starts listening after a cold open
+  # varies, and at a long interval every shot is a cold open.
+  for i in 1 2 3; do
+    (( STOP )) && break
+    sleep 1
+    cam_apply_fixed "$DEV" || true
+  done
+
+  wait "$FFPID" 2>/dev/null || true
+  FFPID=""
+  [[ -s "$tmp" ]] || return 1
+  mv -f "$tmp" "$out"
+}
+
+# Fire on a schedule anchored to the session start, so the time each shot takes
+# cannot accumulate into drift across a multi-day run.
+shot_loop() {
+  local n=0 start target now delay out
+  start="$(date +%s)"
+  while (( STOP == 0 )); do
+    target="$(awk -v s="$start" -v n="$n" -v i="$INTERVAL" 'BEGIN{ printf "%.0f", s + n * i }')"
+    now="$(date +%s)"
+    delay=$(( target - now ))
+    if (( delay > 0 )); then
+      sleep "$delay" & SLEEPPID=$!
+      wait "$SLEEPPID" 2>/dev/null || true
+      SLEEPPID=""
+    fi
+    (( STOP )) && break
+
+    out="$FRAMES/$(date '+%Y%m%d-%H%M%S').jpg"
+    if take_shot "$out"; then
+      SHOTS=$((SHOTS + 1))
+    elif (( STOP == 0 )); then
+      MISSES=$((MISSES + 1))
+      warn "shot $((n + 1)) produced no frame — see $LOG"
+    fi
+    n=$(( n + 1 ))
+  done
+}
+
+# --- go --------------------------------------------------------------------
+if (( DURATION > 0 )); then
+  ( sleep "$DURATION"; kill -TERM $$ 2>/dev/null || true ) &
+  TIMER=$!
+fi
+
+SESSION_LIVE=1
+write_fixed_controls
+shot_loop

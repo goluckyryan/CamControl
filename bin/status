@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Show what a session captured, and whether it is still running.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+
+if ! SDIR="$(resolve_session "${1:-}")"; then
+  info "no sessions yet — start one with: bin/capture"
+  exit 0
+fi
+
+META="$SDIR/session.json"
+# session_get returns non-zero for a missing file or key. Guard every capture
+# of it: a bare assignment would abort the script under `set -e`, before the
+# default on the next line could apply, and print nothing at all.
+[[ -f "$META" ]] || warn "no session.json in $SDIR (interrupted session?); reporting from the frames alone"
+iv="$(session_get "$META" interval_sec || true)"; : "${iv:=$INTERVAL_SEC}"
+
+echo "session   : $(basename "$SDIR")"
+if session_is_running "$SDIR"; then
+  echo "state     : ${C_GRN}running${C_OFF} (pid $(cat "$SDIR/capture.pid"))"
+else
+  echo "state     : stopped"
+fi
+echo "device    : $(session_get "$META" device || true) ($(session_get "$META" card || true))"
+echo "mode      : $(session_get "$META" format) $(session_get "$META" width)x$(session_get "$META" height)"
+echo "interval  : ${iv}s"
+echo "started   : $(session_get "$META" started)"
+
+misses="$(session_get "$META" misses || true)"
+[[ -n "$misses" && "$misses" != "0" ]] && echo "misses    : ${C_YEL}${misses}${C_OFF} (shots that produced no frame)"
+
+echo
+python3 "$HELIOS_ROOT/tools/session_report.py" "$SDIR/frames" "$iv"
+
+# Projected cost is only meaningful while frames are still arriving.
+if session_is_running "$SDIR"; then
+  n="$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' | wc -l)"
+  if (( n > 1 )); then
+    bytes="$(du -sb "$SDIR/frames" | cut -f1)"
+    per=$(( bytes / n ))
+    hourly=$(awk -v p="$per" -v iv="$iv" 'BEGIN{printf "%.0f", p*3600/iv/1e6}')
+    echo
+    echo "rate      : ~${hourly} MB/hour at ${iv}s ($(awk -v iv="$iv" 'BEGIN{printf "%.0f", 3600/iv}') frames/hour)"
+    echo "free      : $(free_mb "$SDIR") MB"
+  fi
+  last="$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' -printf '%T@\n' | sort -n | tail -1)"
+  if [[ -n "$last" ]]; then
+    age=$(awk -v l="$last" 'BEGIN{printf "%.0f", systime()-l}')
+    (( age > 3 * ${iv%.*} )) && warn "last frame was ${age}s ago — expected one every ${iv}s"
+  fi
+fi

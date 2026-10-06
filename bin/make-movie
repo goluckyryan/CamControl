@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Assemble a session's frames into a video.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+need ffmpeg
+
+usage() {
+  cat <<USAGE
+usage: bin/make-movie [session] [options]
+
+  session            name under sessions/, a path, or omitted for the newest
+
+      --fps N        playback rate (default ${OUT_FPS}); speedup = interval x fps
+      --timestamp    burn in capture time and elapsed time
+      --deflicker    smooth residual brightness variation between frames
+      --preset P     libx264 preset (default ${PRESET})
+      --crf N        libx264 quality, lower is better (default ${CRF})
+      --out PATH     output file (default helios_<session>.mp4 in the session)
+  -h, --help         this text
+USAGE
+}
+
+SESSION=""; FPS="$OUT_FPS"; TIMESTAMP=0; DEFLICKER=0; OUT=""
+while (( $# )); do
+  case "$1" in
+    --fps)       FPS="${2:?--fps needs a value}"; shift 2 ;;
+    --preset)    PRESET="${2:?--preset needs a value}"; shift 2 ;;
+    --crf)       CRF="${2:?--crf needs a value}"; shift 2 ;;
+    --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
+    --timestamp) TIMESTAMP=1; shift ;;
+    --deflicker) DEFLICKER=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    -*)          die "unknown option '$1' (try --help)" ;;
+    *)           [[ -z "$SESSION" ]] || die "more than one session given"; SESSION="$1"; shift ;;
+  esac
+done
+
+SDIR="$(resolve_session "$SESSION")" || die "no such session: '${SESSION:-<newest>}'"
+SID="$(basename "$SDIR")"
+[[ -d "$SDIR/frames" ]] || die "$SDIR has no frames/ directory"
+
+# -maxdepth 1 so the count matches what the glob below actually feeds ffmpeg.
+COUNT="$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' | wc -l)"
+(( COUNT > 0 )) || die "no frames in $SDIR/frames"
+(( COUNT > 1 )) || die "only one frame in $SDIR/frames — nothing to animate"
+
+if session_is_running "$SDIR"; then
+  warn "this session is still capturing; building a movie from the ${COUNT} frames so far"
+fi
+
+META="$SDIR/session.json"
+# Guarded: an unguarded assignment from session_get aborts under `set -e` when
+# session.json is missing a key, which would make the fallback just below --
+# and the whole command -- silently unreachable.
+IV="$(session_get "$META" interval_sec || true)"; : "${IV:=$INTERVAL_SEC}"
+W="$(session_get "$META" width || true)"; H="$(session_get "$META" height || true)"
+if [[ -z "$W" || -z "$H" || "$W" == "0" ]]; then
+  first="$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' | sort | head -1)"
+  read -r W H < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+                    -of csv=p=0 "$first" | tr ',' ' ')
+fi
+
+SPEEDUP="$(awk -v i="$IV" -v f="$FPS" 'BEGIN{printf "%.0f", i*f}')"
+VIDLEN="$(awk -v c="$COUNT" -v f="$FPS" 'BEGIN{printf "%.1f", c/f}')"
+REALLEN="$(awk -v c="$COUNT" -v i="$IV" 'BEGIN{printf "%.1f", c*i/60}')"
+
+if [[ -z "$OUT" ]]; then
+  OUT="$SDIR/helios_${SID}.mp4"
+else
+  # Resolved now, because the encode runs from inside the session directory.
+  OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" \
+    || die "output directory for '$OUT' does not exist"
+fi
+
+info "session   : $SID"
+info "frames    : $COUNT at ${IV}s  (~${REALLEN} min of real time)"
+info "playback  : ${FPS} fps  ->  ${SPEEDUP}x speedup, ${VIDLEN}s of video"
+info "encoding  : libx264 crf ${CRF} preset ${PRESET}, ${W}x${H}"
+
+# Gaps are judged against this session's own interval, so a 20s session is not
+# flagged just because another one used 10s.
+gaps="$(python3 "$HELIOS_ROOT/tools/session_report.py" "$SDIR/frames" "$IV" | sed -n '/^gaps/,$p')"
+if [[ "$gaps" != "gaps      : none" ]]; then
+  warn "discontinuities in this session — the video will jump at these points:"
+  printf '%s\n' "$gaps" >&2
+fi
+
+# Run from inside the session so filter arguments never contain awkward paths.
+cd "$SDIR"
+
+FILTERS=()
+(( DEFLICKER )) && FILTERS+=("deflicker=mode=pm:size=7")
+if (( TIMESTAMP )); then
+  python3 "$HELIOS_ROOT/tools/gen_ass.py" "$FPS" "$W" "$H" overlay.ass --frames frames >&2
+  # The overlay is built from parsed filenames while ffmpeg globs every .jpg,
+  # so a frame with an unexpected name would slide the stamps out of step.
+  stamps="$(grep -c '^Dialogue' overlay.ass || true)"
+  (( stamps == COUNT )) || warn "overlay carries ${stamps} stamps for ${COUNT} frames; timestamps would drift (a frame with an unparseable name?)"
+  FILTERS+=("ass=overlay.ass")
+fi
+# h264 needs even dimensions; cheap insurance for odd capture modes. The
+# frames are full-range JPEG, so convert to limited-range yuv420p here rather
+# than leaving the stream tagged with the deprecated yuvj420p.
+FILTERS+=("scale=trunc(iw/2)*2:trunc(ih/2)*2:out_range=tv" "format=yuv420p")
+CHAIN="$(IFS=,; printf '%s' "${FILTERS[*]}")"
+
+ffmpeg -nostdin -hide_banner -loglevel warning -stats -y \
+  -framerate "$FPS" -pattern_type glob -i 'frames/*.jpg' \
+  -vf "$CHAIN" \
+  -c:v libx264 -preset "$PRESET" -crf "$CRF" -pix_fmt yuv420p -color_range tv \
+  -movflags +faststart \
+  "$OUT"
+
+ok "wrote $OUT ($(du -h "$OUT" | cut -f1))"

@@ -1,0 +1,6 @@
+sessions/
+test/data/
+preview.jpg
+*.pyc
+__pycache__/
+shot-*.jpg

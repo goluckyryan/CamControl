@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# List every video node and say which one capture would use, and why.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$HELIOS_ROOT/lib/camera.sh"
+need v4l2-ctl
+
+printf '%-14s %-14s %-26s %s\n' DEVICE DRIVER CARD STATUS
+printf '%-14s %-14s %-26s %s\n' "-----" "------" "----" "------"
+
+skipped=0
+while IFS=$'\t' read -r dev driver card ok reason; do
+  if [[ "$ok" == "1" ]]; then
+    printf '%-14s %-14s %-26s %s%s%s\n' "$dev" "$driver" "${card:0:26}" "$C_GRN" "$reason" "$C_OFF"
+  else
+    skipped=$((skipped + 1))
+    printf '%-14s %-14s %-26s %s%s%s\n' "$dev" "$driver" "${card:0:26}" "$C_DIM" "$reason" "$C_OFF"
+  fi
+done < <(cam_enumerate)
+
+echo
+best="$(cam_detect || true)"
+if [[ -z "$best" ]]; then
+  echo "No usable capture device found. Plug in the USB webcam and re-run." >&2
+  echo "(${skipped} non-camera node(s) were rejected.)" >&2
+  exit 1
+fi
+
+stable="$(cam_stable_path "$best")"
+min_fps="$(min_capture_fps "$INTERVAL_SEC")"
+read -r fmt w h capfps < <(cam_formats "$best" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" "$min_fps")
+
+ok "selected: $best"
+echo "  card          : $(cam_card "$best")"
+echo "  stable path   : $stable"
+echo "  mode          : $fmt ${w}x${h} @ ${capfps} fps"
+echo "  interval      : ${INTERVAL_SEC}s  (capture fps chosen as the lowest >= $(printf '%.3f' "$min_fps"))"
+echo "  rejected      : ${skipped} node(s)"

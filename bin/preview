@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Grab one still so framing and focus can be checked before a long run.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$HELIOS_ROOT/lib/camera.sh"
+need ffmpeg; need v4l2-ctl
+
+OUT="${1:-$HELIOS_ROOT/preview.jpg}"
+
+DEV="${DEVICE:-}"
+[[ -n "$DEV" ]] || DEV="$(cam_detect || true)"
+[[ -n "$DEV" ]] || die "no usable capture device found (run bin/cameras to see why)"
+DEV="$(cam_stable_path "$DEV")"
+
+read -r FMT W H CAPFPS < <(cam_formats "$DEV" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" 1)
+case "$FMT" in
+  MJPG) IFMT=mjpeg ;;
+  YUYV|YUY2) IFMT=yuyv422 ;;
+  *) IFMT="$(printf '%s' "$FMT" | tr '[:upper:]' '[:lower:]')" ;;
+esac
+
+cam_apply_static "$DEV" || true
+
+# Keep overwriting one file for a few seconds so the frame we keep is a settled
+# one, not the corrupt first buffer this camera emits on open.
+NFRAMES="$(awk -v w="$WARMUP_SEC" -v f="$CAPFPS" 'BEGIN{n=int(w*f); print (n<5?5:n)}')"
+
+ffmpeg -nostdin -loglevel error -y \
+  -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
+  -i "$DEV" -frames:v "$NFRAMES" -update 1 -q:v 2 "$OUT"
+
+ok "wrote $OUT  ($FMT ${W}x${H}, kept the last of ${NFRAMES})"
+echo "view it with: xdg-open $OUT" >&2

@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Turn any folder of images into a movie. Independent of sessions: point it at
+# a directory of screenshots from anywhere and it will order them sensibly.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+need ffmpeg
+
+usage() {
+  cat <<USAGE
+usage: bin/folder-movie FOLDER [options]
+
+  FOLDER             directory of images (jpg, png, bmp, tif, webp, gif)
+
+      --fps N        playback rate (default ${OUT_FPS})
+      --out PATH     output file (default FOLDER.mp4 beside the folder)
+      --size WxH     output size (default: the first image's size)
+      --recursive    also include images in subdirectories
+      --timestamp    burn in each image's time and elapsed time
+      --deflicker    smooth brightness variation between images
+      --preset P     libx264 preset (default ${PRESET})
+      --crf N        libx264 quality, lower is better (default ${CRF})
+  -h, --help         this text
+
+Images are ordered by timestamp when every filename contains one, otherwise by
+a natural sort (so img2 comes before img10). Mixed sizes are scaled and padded
+to fit, so nothing is cropped.
+USAGE
+}
+
+FOLDER=""; FPS="$OUT_FPS"; OUT=""; SIZE=""; RECURSIVE=0
+TIMESTAMP=0; DEFLICKER=0
+while (( $# )); do
+  case "$1" in
+    --fps)       FPS="${2:?--fps needs a value}"; shift 2 ;;
+    --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
+    --size)      SIZE="${2:?--size needs a value}"; shift 2 ;;
+    --preset)    PRESET="${2:?--preset needs a value}"; shift 2 ;;
+    --crf)       CRF="${2:?--crf needs a value}"; shift 2 ;;
+    --recursive) RECURSIVE=1; shift ;;
+    --timestamp) TIMESTAMP=1; shift ;;
+    --deflicker) DEFLICKER=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    -*)          die "unknown option '$1' (try --help)" ;;
+    *)           [[ -z "$FOLDER" ]] || die "more than one folder given"; FOLDER="$1"; shift ;;
+  esac
+done
+
+[[ -n "$FOLDER" ]] || { usage; exit 1; }
+[[ -d "$FOLDER" ]] || die "'$FOLDER' is not a directory"
+FOLDER="$(readlink -f "$FOLDER")"
+awk -v f="$FPS" 'BEGIN{exit !(f>0)}' || die "--fps must be greater than zero"
+
+if [[ -z "$OUT" ]]; then
+  OUT="${FOLDER}.mp4"
+else
+  OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" \
+    || die "output directory for '$OUT' does not exist"
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+REC=(); (( RECURSIVE )) && REC=(--recursive)
+# build_sequence.py explains the problem on stderr; add a clean exit here
+# rather than letting bash complain about the unset variables below.
+if ! SEQ="$(python3 "$HELIOS_ROOT/tools/build_sequence.py" "$FOLDER" "$WORK" \
+              "${REC[@]}" --times "$WORK/times.tsv")"; then
+  die "no usable images in '$FOLDER'$( (( RECURSIVE )) || printf ' (try --recursive)' )"
+fi
+# Parsed rather than eval'd: the staging path is ours, but a key=value line is
+# not shell, and every field gets a defined default this way.
+COUNT=0; PATTERN=""; ORDERED=""; FIRST=""
+while IFS='=' read -r k v; do
+  case "$k" in
+    count)      COUNT="$v" ;;
+    pattern)    PATTERN="$v" ;;
+    ordered_by) ORDERED="$v" ;;
+    first)      FIRST="$v" ;;
+  esac
+done <<< "$SEQ"
+
+(( COUNT > 1 )) || die "need at least 2 images to make a movie (found ${COUNT})"
+if [[ "$ORDERED" == "timestamp" ]]; then
+  info "ordered   : by the timestamps in the filenames"
+else
+  info "ordered   : by filename (natural sort, so img2 precedes img10)"
+fi
+
+# Size comes from the first image unless overridden, so a folder of uniform
+# screenshots keeps its native resolution.
+if [[ -n "$SIZE" ]]; then
+  W="${SIZE%%x*}"; H="${SIZE##*x}"
+else
+  read -r W H < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+                    -of csv=p=0 "$FIRST" | tr ',' ' ') || die "could not read image size from $FIRST"
+fi
+W=$(( (W / 2) * 2 )); H=$(( (H / 2) * 2 ))   # h264 needs even dimensions
+
+VIDLEN="$(awk -v c="$COUNT" -v f="$FPS" 'BEGIN{printf "%.1f", c/f}')"
+info "images    : $COUNT"
+info "playback  : ${FPS} fps  ->  ${VIDLEN}s of video"
+info "encoding  : libx264 crf ${CRF} preset ${PRESET}, ${W}x${H}"
+
+FILTERS=()
+(( DEFLICKER )) && FILTERS+=("deflicker=mode=pm:size=7")
+# Letterbox rather than crop, so mixed-size folders lose nothing.
+FILTERS+=("scale=${W}:${H}:force_original_aspect_ratio=decrease:out_range=tv")
+FILTERS+=("pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2")
+if (( TIMESTAMP )); then
+  python3 "$HELIOS_ROOT/tools/gen_ass.py" "$FPS" "$W" "$H" "$WORK/overlay.ass" --list "$WORK/times.tsv" >&2
+  FILTERS+=("ass=$WORK/overlay.ass")
+fi
+FILTERS+=("format=yuv420p")
+CHAIN="$(IFS=,; printf '%s' "${FILTERS[*]}")"
+
+ffmpeg -nostdin -hide_banner -loglevel warning -stats -y \
+  -framerate "$FPS" -start_number 1 -i "$PATTERN" \
+  -vf "$CHAIN" \
+  -c:v libx264 -preset "$PRESET" -crf "$CRF" -pix_fmt yuv420p -color_range tv \
+  -movflags +faststart \
+  "$OUT"
+
+ok "wrote $OUT ($(du -h "$OUT" | cut -f1))"

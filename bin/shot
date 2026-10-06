@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Take one still using the fixed parameters from config.sh -- exactly the frame
+# a shot-mode session would record.
+#
+# This is not bin/preview. Preview stays on auto, to show what the camera would
+# choose for itself; this shows what your own settings actually produce, which
+# is what you want before committing to a long run.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$HELIOS_ROOT/lib/camera.sh"
+need ffmpeg; need v4l2-ctl
+
+case "${1:-}" in
+  -h|--help)
+    cat <<USAGE
+usage: bin/shot [out.jpg]
+
+Takes a single still with the FIX_* values from config.sh applied.
+Default output: shot-<timestamp>.jpg in $HELIOS_ROOT
+USAGE
+    exit 0 ;;
+esac
+
+OUT="${1:-$HELIOS_ROOT/shot-$(date '+%Y%m%d-%H%M%S').jpg}"
+[[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
+[[ -d "$(dirname "$OUT")" ]] || die "no such directory: $(dirname "$OUT")"
+
+DEV="${DEVICE:-}"
+[[ -n "$DEV" ]] || DEV="$(cam_detect || true)"
+[[ -n "$DEV" ]] || die "no usable capture device found (run bin/cameras to see why)"
+DEV="$(cam_stable_path "$DEV")"
+
+read -r FMT W H CAPFPS < <(cam_formats "$DEV" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" 1) \
+  || die "could not determine a capture mode for $DEV"
+case "$FMT" in
+  MJPG) IFMT=mjpeg ;;
+  YUYV|YUY2) IFMT=yuyv422 ;;
+  *) IFMT="$(printf '%s' "$FMT" | tr '[:upper:]' '[:lower:]')" ;;
+esac
+
+SUMMARY=""
+for kv in "exposure=${FIX_EXPOSURE:-}" "wb=${FIX_WB:-}" "focus=${FIX_FOCUS:-}" "gain=${FIX_GAIN:-}"; do
+  [[ -n "${kv#*=}" ]] && SUMMARY+="${SUMMARY:+  }${kv}"
+done
+info "device    : $DEV"
+info "fixed     : ${SUMMARY:-none set in config.sh — the camera will meter this shot itself}"
+
+TMP="$(mktemp -u "${TMPDIR:-/tmp}/helios-shot.XXXXXX").jpg"
+cleanup() { rm -f "$TMP"; }
+trap cleanup EXIT
+
+# Same shape as a session shot: start the stream, write the controls once it is
+# up (a write to an idle device is discarded), let the rest of the window settle.
+ffmpeg -nostdin -loglevel error -y \
+  -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
+  -i "$DEV" -t "$SHOT_SETTLE_SEC" -update 1 -q:v "$JPEG_QUALITY" "$TMP" &
+FFPID=$!
+# Written several times across the early window: how soon the camera starts
+# listening after a cold open varies, and one write at a fixed moment misses it.
+for _i in 1 2 3; do
+  sleep 1
+  cam_apply_fixed "$DEV" || warn "could not apply some fixed controls"
+done
+# Read the value while the stream is still open. A control read after the
+# device closes does not reflect what the shot was actually taken at.
+rest=$(( SHOT_SETTLE_SEC - 4 )); (( rest < 1 )) && rest=1
+sleep "$rest"
+RAN="$(cam_get_num "$DEV" exposure_time_absolute 2>/dev/null || true)"
+
+wait "$FFPID" || die "ffmpeg failed; the camera may be in use by another process"
+
+[[ -s "$TMP" ]] || die "no frame produced in ${SHOT_SETTLE_SEC}s"
+mv -f "$TMP" "$OUT"
+
+ok "wrote $OUT  ($FMT ${W}x${H}, $(du -h "$OUT" | cut -f1))"
+[[ -n "${RAN:-}" ]] && info "camera ran at exposure_time_absolute=${RAN}"
