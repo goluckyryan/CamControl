@@ -1,5 +1,5 @@
 sessions/
-test/data/
+test/
 preview.jpg
 *.pyc
 __pycache__/
