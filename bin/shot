@@ -73,4 +73,9 @@ wait "$FFPID" || die "ffmpeg failed; the camera may be in use by another process
 mv -f "$TMP" "$OUT"
 
 ok "wrote $OUT  ($FMT ${W}x${H}, $(du -h "$OUT" | cut -f1))"
-[[ -n "${RAN:-}" ]] && info "camera ran at exposure_time_absolute=${RAN}"
+# An `if` and not a trailing `&&`: the readback is best-effort (it can miss if
+# the device is busy as the stream closes), and as the last statement of the
+# script a false `&&` would make a shot that worked exit non-zero.
+if [[ -n "${RAN:-}" ]]; then
+  info "camera ran at exposure_time_absolute=${RAN}"
+fi
