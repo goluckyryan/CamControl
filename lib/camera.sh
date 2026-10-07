@@ -195,6 +195,21 @@ cam_run_ffmpeg() {
   fi
 }
 
+# Same, for the callers that background the job and keep $! to kill it later.
+# The filtered form above cannot be used there: the process substitution is a
+# redirection, so bash runs ffmpeg in a *child* of the job and $! becomes a shell
+# that dies first — the real ffmpeg is orphaned, keeps the camera open, and
+# finishes writing to a path its parent has already deleted (creating it back as
+# a plain file). Here the job shell replaces itself with ffmpeg, so the pid the
+# caller holds IS the process the kill has to reach. Only safe where the command
+# is backgrounded: exec does not return, so a foreground caller would not come
+# back to its next line (bin/preview is why both forms exist).
+cam_exec_ffmpeg() {
+  local card="$1"; shift
+  cam_is_noisy "$card" && exec 2> >(cam_hush_stderr >&2)
+  exec "$@"
+}
+
 # Apply the fixed parameters from config.sh. No calibration, no readback: what
 # is configured is what is written. A control with no FIX_* value is left on
 # auto rather than frozen at whatever it happened to be showing, so setting

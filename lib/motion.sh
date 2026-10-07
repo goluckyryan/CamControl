@@ -74,7 +74,8 @@ motion_watch() {
   # It must survive until both sides have opened it — ffmpeg only creates
   # its output once the input is up, a second or two after these jobs
   # start, and an unlinked path would make it O_CREAT a second fifo that
-  # the reader never sees. motion_stop and the exit below remove it.
+  # the reader never sees. That is why the signal handlers call
+  # motion_stop_kill and leave this path to the exit below.
   local fifo; fifo="$(mktemp -u "${TMPDIR:-/tmp}/helios-motion.XXXXXX")"
   mkfifo "$fifo" || return 4
   MOTION_FIFO="$fifo"
@@ -99,7 +100,7 @@ motion_watch() {
       hot_out=( -update 1 -q:v "$JPEG_QUALITY" -t "$left" "$MOTION_HOT_FILE" )
     fi
   fi
-  cam_run_ffmpeg "$card" ffmpeg -nostdin -loglevel error -y \
+  cam_exec_ffmpeg "$card" ffmpeg -nostdin -loglevel error -y \
     -f v4l2 -input_format "$mifmt" -video_size "${mw}x${mh}" -framerate "$mfps" \
     -i "$dev" \
     -vf "scale=${MOTION_SCAN_W}:${MOTION_SCAN_H},format=gray" \
@@ -107,7 +108,7 @@ motion_watch() {
   MOTION_FFPID=$!
   "$HELIOS_ROOT/tools/motion_watch.py" \
     "$MOTION_SCAN_W" "$MOTION_SCAN_H" "$MOTION_SENS" "$mfps" "$MOTION_WARMUP_SEC" \
-    "${MOTION_DELAY_SEC:-0}" \
+    "${MOTION_DELAY_SEC:-1}" \
     <"$fifo" &
   MOTION_PYPID=$!
 
@@ -120,6 +121,7 @@ motion_watch() {
   # frames to be *stable relative to each other*.)
   local i
   for i in 1 2 3; do
+    (( ${CMD_PENDING:-0} )) && break
     sleep 0.5
     if ! kill -0 "$MOTION_FFPID" 2>/dev/null; then
       # ffmpeg is gone. The watcher either just saw end of stream and is
@@ -132,9 +134,24 @@ motion_watch() {
     cam_apply_fixed "$dev" || true
   done
 
-  wait "$MOTION_PYPID"; rc=$?
+  # A command typed while an interactive session was opening this stream had
+  # nothing to kill: its signal arrived before there was a pid to signal, so it
+  # ended nothing and the wait below would hold the camera for the rest of the
+  # window. The pending flag is what says "someone is waiting for this window to
+  # end" — reading it here is what turns a swallowed signal into a short one.
+  if (( ${CMD_PENDING:-0} )); then
+    kill "$MOTION_PYPID" 2>/dev/null || true
+  fi
 
-  # Post-trigger hold (--delaySec) lives in tools/motion_watch.py, not
+  # The pids are empty when a signal handler has already reaped the watcher,
+  # and 'wait ""' prints an error rather than doing nothing; the 2>/dev/null is
+  # for the handler that lands between the check and the wait.
+  rc=1
+  if [[ -n "$MOTION_PYPID" ]]; then
+    wait "$MOTION_PYPID" 2>/dev/null; rc=$?
+  fi
+
+  # Post-trigger hold (-delaySec) lives in tools/motion_watch.py, not
   # here: the hot frame advances only while someone drains the fifo, and
   # the moment python exits ffmpeg takes a broken pipe and the held frame
   # freezes. Python keeps reading for the hold, ffmpeg keeps writing, and
@@ -142,9 +159,13 @@ motion_watch() {
   # whichever comes first, so a scheduled shot is never late.
 
   # Killing ffmpeg here, and waiting for it, is what freezes the hot frame:
-  # the caller gets a file that can no longer change under its hands.
-  kill "$MOTION_FFPID" 2>/dev/null || true
-  wait "$MOTION_FFPID" 2>/dev/null || true
+  # the caller gets a file that can no longer change under its hands. Both pids
+  # are empty when a signal handler has already ended the watcher, and 'wait ""'
+  # prints an error rather than doing nothing, so they are checked; motion_stop_kill
+  # is what makes sure the kill lands even when ffmpeg is stuck in a syscall.
+  motion_stop_kill
+  [[ -n "$MOTION_FFPID" ]] && wait "$MOTION_FFPID" 2>/dev/null || true
+  [[ -n "$MOTION_PYPID"  ]] && wait "$MOTION_PYPID"  2>/dev/null || true
   rm -f "$fifo"
   MOTION_FFPID=""; MOTION_PYPID=""; MOTION_FIFO=""
   # The hot frame is the prize of a triggered watch; on any other outcome
@@ -157,11 +178,44 @@ motion_watch() {
 }
 
 # Everything motion_watch leaves behind, for a caller's signal/cleanup trap.
+# It deliberately does *not* clear the pids and does not touch the fifo: the
+# trap fires in the middle of motion_watch, which still has to reap both
+# children, and unlinking the path out from under it lets ffmpeg O_CREAT a
+# plain file there that nothing ever removes.
+motion_stop_kill() {
+  local ff="$MOTION_FFPID" py="$MOTION_PYPID"
+  [[ -n "$ff" ]] && kill -TERM "$ff" 2>/dev/null || true
+  [[ -n "$py" ]] && kill -TERM "$py"  2>/dev/null || true
+  # A watcher stopped under its feet does not always take the hint. When python
+  # dies first, ffmpeg is usually still opening the camera; it then blocks in
+  # open() on the fifo with no reader left, retrying the interrupt it gets there,
+  # so the flag its TERM handler sets is never looked at. Left at that it holds
+  # the camera until its own -t runs out — and with the device busy, every
+  # window after it fails. Brief grace for the case that does listen, then the
+  # device is taken back.
+  [[ -n "$ff$py" ]] && sleep 0.3
+  [[ -n "$ff" ]] && kill -KILL "$ff" 2>/dev/null || true
+  [[ -n "$py" ]] && kill -KILL "$py"  2>/dev/null || true
+  # Reaped here, not by the caller: a job that dies while the shell is waiting on
+  # something else prints a "Killed" notice into the session's output, and this is
+  # the last place that still knows which processes they were. The caller's own
+  # waits then come back empty-handed, which reads as "the watcher did not
+  # trigger" — the right answer on every path that kills a watcher.
+  [[ -n "$ff" ]] && wait "$ff" 2>/dev/null || true
+  [[ -n "$py" ]] && wait "$py"  2>/dev/null || true
+  return 0
+}
+
+# Stop the watcher for good, and take its files with it: called when no watch is
+# in progress (finalize), where nothing is left to return to. The reaping happens
+# before the unlink on purpose — ffmpeg that had not opened the fifo yet would
+# otherwise create a plain file at a path nothing ever removes again.
 motion_stop() {
-  [[ -n "$MOTION_FFPID" ]] && kill -TERM "$MOTION_FFPID" 2>/dev/null || true
-  [[ -n "$MOTION_PYPID"  ]] && kill -TERM "$MOTION_PYPID"  2>/dev/null || true
-  [[ -n "${MOTION_FIFO:-}"  ]] && rm -f "$MOTION_FIFO" || true
+  motion_stop_kill
+  [[ -n "$MOTION_FFPID" ]] && wait "$MOTION_FFPID" 2>/dev/null || true
+  [[ -n "$MOTION_PYPID"  ]] && wait "$MOTION_PYPID"  2>/dev/null || true
+  [[ -n "${MOTION_FIFO:-}" ]] && rm -f "$MOTION_FIFO" || true
   [[ -n "${MOTION_HOT_DIR:-}" ]] && rm -rf "$MOTION_HOT_DIR" || true
-  MOTION_FFPID=""; MOTION_PYPID=""; MOTION_FIFO=""
+  MOTION_FIFO=""; MOTION_FFPID=""; MOTION_PYPID=""
   MOTION_HOT_DIR=""; MOTION_HOT_FILE=""
 }

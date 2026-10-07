@@ -11,7 +11,7 @@ source "$HELIOS_ROOT/lib/camera.sh"
 need ffmpeg; need v4l2-ctl
 
 case "${1:-}" in
-  -h|--help)
+  -h|-help)
     cat <<USAGE
 usage: bin/shot [out.jpg]
 
@@ -19,6 +19,9 @@ Takes a single still with the FIX_* values from config.sh applied.
 Default output: shot-<timestamp>.jpg in $HELIOS_ROOT
 USAGE
     exit 0 ;;
+  # An output file never starts with a dash, so a flag here is a mistake and
+  # not a filename: taking the shot into a file called '--help' would bury it.
+  -?*) die_opt "$1" ;;
 esac
 
 OUT="${1:-$HELIOS_ROOT/shot-$(date '+%Y%m%d-%H%M%S').jpg}"
@@ -54,7 +57,7 @@ trap cleanup EXIT
 # up (a write to an idle device is discarded), let the rest of the window settle.
 # cam_run_ffmpeg hides this camera's per-frame APP-field noise, where the card
 # is known for it (see lib/camera.sh); everything else prints as before.
-cam_run_ffmpeg "$CARD" ffmpeg -nostdin -loglevel error -y \
+cam_exec_ffmpeg "$CARD" ffmpeg -nostdin -loglevel error -y \
   -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
   -i "$DEV" -t "$SHOT_SETTLE_SEC" -update 1 -q:v "$JPEG_QUALITY" "$TMP" &
 FFPID=$!
