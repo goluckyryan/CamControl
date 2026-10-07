@@ -3,6 +3,11 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
+case "${1:-}" in
+  -h|-help) echo "usage: bin/stop [session]   (omitted: the running one)" >&2; exit 0 ;;
+  -?*) die_opt "$1" ;;
+esac
+
 SDIR="$(resolve_session "${1:-}")" || die "no session found (nothing running, and sessions/ is empty)"
 
 if ! session_is_running "$SDIR"; then

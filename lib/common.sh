@@ -27,7 +27,7 @@ CURRENT_LINK="$SESSIONS_DIR/current"
 : "${MOTION_ONLY:=0}"
 : "${MOTION_SENS:=2}"
 : "${MOTION_COOLDOWN_SEC:=5}"
-: "${MOTION_DELAY_SEC:=0}"    # hold the hot frame this long after a trigger
+: "${MOTION_DELAY_SEC:=1}"    # hold the hot frame this long after a trigger
 : "${MOTION_MAX_WIDTH:=640}"
 : "${MOTION_MAX_HEIGHT:=360}"
 : "${MOTION_WARMUP_SEC:=2}"
@@ -55,6 +55,16 @@ die()  { printf '%serror:%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found; install it and retry"; }
 
+# Every flag in this rig takes ONE dash: -motion, -duration, -fps. The two-dash
+# GNU form is not accepted anywhere, so anyone who types it by habit gets the
+# rule and the spelling they meant rather than a bare "unknown option".
+die_opt() {
+  case "$1" in
+    --?*) die "unknown option '$1'; flags here take a single dash, not two (try -h)" ;;
+    *)    die "unknown option '$1' (try -h)" ;;
+  esac
+}
+
 # Compare two decimals without bc: fcmp A OP B, OP in lt le gt ge
 fcmp() {
   awk -v a="$1" -v b="$3" -v op="$2" 'BEGIN{
@@ -64,7 +74,7 @@ fcmp() {
 }
 
 # "10s" / "11m" / "1h" / "1.5m" / "90" -> a number of seconds.
-# Shared by run.sh (-t) and bin/capture (--duration), which both speak it.
+# Shared by run.sh (-t) and bin/capture (-duration), which both speak it.
 to_seconds() {
   local v="$1" n u
   [[ "$v" =~ ^([0-9]+(\.[0-9]+)?)([sSmMhH]?)$ ]] || return 1

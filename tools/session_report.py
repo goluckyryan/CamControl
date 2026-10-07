@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Frame statistics and gap detection for one session.
 
-usage: session_report.py FRAMES_DIR INTERVAL [--json]
+usage: session_report.py FRAMES_DIR INTERVAL [-json]
 
 The gap threshold is derived from the session's own interval, so a session
 captured at 20s is not reported as gappy just because another used 10s.
+Flags take one dash, like every other command in this repo.
 """
 import json
 import sys
@@ -31,12 +32,14 @@ def build(frames_dir, interval):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    # Compared rather than prefix-filtered: "-json" is the only option here,
+    # and an interval or a directory is never going to look like it.
+    args = [a for a in sys.argv[1:] if a != "-json"]
     if len(args) != 2:
         sys.exit(__doc__)
     rep = build(args[0], float(args[1]))
 
-    if "--json" in sys.argv[1:]:
+    if "-json" in sys.argv[1:]:
         json.dump(rep, sys.stdout, indent=2)
         print()
         return

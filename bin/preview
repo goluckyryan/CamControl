@@ -5,6 +5,22 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
 need ffmpeg; need v4l2-ctl
 
+case "${1:-}" in
+  -h|-help)
+    cat <<USAGE
+usage: bin/preview [out.jpg]
+
+One still on AUTO exposure/white balance, to check framing and focus.
+Default output: preview.jpg in $HELIOS_ROOT
+Unlike bin/shot this does not apply the FIX_* values — it shows what the
+camera would choose for itself.
+USAGE
+    exit 0 ;;
+  # A flag is not an output filename; say so instead of writing preview into
+  # a file called '--help'.
+  -?*) die_opt "$1" ;;
+esac
+
 OUT="${1:-$HELIOS_ROOT/preview.jpg}"
 
 DEV="${DEVICE:-}"

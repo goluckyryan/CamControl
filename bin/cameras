@@ -5,6 +5,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
 need v4l2-ctl
 
+case "${1:-}" in
+  -h|-help) echo "usage: bin/cameras   (list every video node, the choice, and why)" >&2; exit 0 ;;
+  -?*) die_opt "$1" ;;
+esac
+
 printf '%-14s %-14s %-26s %s\n' DEVICE DRIVER CARD STATUS
 printf '%-14s %-14s %-26s %s\n' "-----" "------" "----" "------"
 

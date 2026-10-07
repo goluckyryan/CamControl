@@ -10,27 +10,29 @@ usage: bin/make-movie [session] [options]
 
   session            name under sessions/, a path, or omitted for the newest
 
-      --fps N        playback rate (default ${OUT_FPS}); speedup = interval x fps
-      --timestamp    burn in capture time and elapsed time
-      --deflicker    smooth residual brightness variation between frames
-      --preset P     libx264 preset (default ${PRESET})
-      --crf N        libx264 quality, lower is better (default ${CRF})
-      --out PATH     output file (default helios_<session>.mp4 in the session)
-  -h, --help         this text
+One dash, long names included.
+
+      -fps N         playback rate (default ${OUT_FPS}); speedup = interval x fps
+      -timestamp     burn in capture time and elapsed time
+      -deflicker     smooth residual brightness variation between frames
+      -preset P      libx264 preset (default ${PRESET})
+      -crf N         libx264 quality, lower is better (default ${CRF})
+      -out PATH      output file (default helios_<session>.mp4 in the session)
+  -h, -help          this text
 USAGE
 }
 
 SESSION=""; FPS="$OUT_FPS"; TIMESTAMP=0; DEFLICKER=0; OUT=""
 while (( $# )); do
   case "$1" in
-    --fps)       FPS="${2:?--fps needs a value}"; shift 2 ;;
-    --preset)    PRESET="${2:?--preset needs a value}"; shift 2 ;;
-    --crf)       CRF="${2:?--crf needs a value}"; shift 2 ;;
-    --out)       OUT="${2:?--out needs a value}"; shift 2 ;;
-    --timestamp) TIMESTAMP=1; shift ;;
-    --deflicker) DEFLICKER=1; shift ;;
-    -h|--help)   usage; exit 0 ;;
-    -*)          die "unknown option '$1' (try --help)" ;;
+    -fps)        FPS="${2:?-fps needs a value}"; shift 2 ;;
+    -preset)     PRESET="${2:?-preset needs a value}"; shift 2 ;;
+    -crf)        CRF="${2:?-crf needs a value}"; shift 2 ;;
+    -out)        OUT="${2:?-out needs a value}"; shift 2 ;;
+    -timestamp)  TIMESTAMP=1; shift ;;
+    -deflicker)  DEFLICKER=1; shift ;;
+    -h|-help)    usage; exit 0 ;;
+    -*)          die_opt "$1" ;;
     *)           [[ -z "$SESSION" ]] || die "more than one session given"; SESSION="$1"; shift ;;
   esac
 done
@@ -91,7 +93,7 @@ cd "$SDIR"
 FILTERS=()
 (( DEFLICKER )) && FILTERS+=("deflicker=mode=pm:size=7")
 if (( TIMESTAMP )); then
-  python3 "$HELIOS_ROOT/tools/gen_ass.py" "$FPS" "$W" "$H" overlay.ass --frames frames >&2
+  python3 "$HELIOS_ROOT/tools/gen_ass.py" "$FPS" "$W" "$H" overlay.ass -frames frames >&2
   # The overlay is built from parsed filenames while ffmpeg globs every .jpg,
   # so a frame with an unexpected name would slide the stamps out of step.
   stamps="$(grep -c '^Dialogue' overlay.ass || true)"

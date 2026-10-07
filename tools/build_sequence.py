@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Stage a folder of images as a numbered sequence ffmpeg can read in order.
 
-usage: build_sequence.py FOLDER WORKDIR [--recursive] [--times FILE]
+usage: build_sequence.py FOLDER WORKDIR [-recursive] [-times FILE]
 prints: count=N pattern=PATH first=PATH ordered_by=... normalized=0|1
+
+Flags take one dash, like every other command in this repo.
 
 Why not a concat list or a glob:
   - the concat demuxer picks one decoder from the first entry, so a folder
@@ -52,8 +54,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder", type=pathlib.Path)
     ap.add_argument("workdir", type=pathlib.Path)
-    ap.add_argument("--recursive", action="store_true")
-    ap.add_argument("--times", type=pathlib.Path)
+    ap.add_argument("-recursive", action="store_true")
+    ap.add_argument("-times", type=pathlib.Path)
     a = ap.parse_args()
 
     it = a.folder.rglob("*") if a.recursive else a.folder.glob("*")

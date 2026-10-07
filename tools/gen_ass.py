@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build an ASS subtitle track stamping each image with its capture time.
 
-usage: gen_ass.py FPS WIDTH HEIGHT OUT_ASS (--frames DIR | --list FILE)
+usage: gen_ass.py FPS WIDTH HEIGHT OUT_ASS (-frames DIR | -list FILE)
 
-  --frames DIR   a session frames/ directory (times come from the filenames)
-  --list FILE    "name<TAB>isotime" lines, as written by build_sequence.py
+  -frames DIR   a session frames/ directory (times come from the filenames)
+  -list FILE    "name<TAB>isotime" lines, as written by build_sequence.py
+
+Flags take one dash, like every other command in this repo.
 
 Times come from the images themselves, so the overlay stays truthful at any
 interval and tells the truth across gaps. The images are never modified, which
@@ -53,8 +55,8 @@ def main():
     ap.add_argument("height", type=int)
     ap.add_argument("out")
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--frames")
-    g.add_argument("--list")
+    g.add_argument("-frames")
+    g.add_argument("-list")
     a = ap.parse_args()
 
     if a.frames:
