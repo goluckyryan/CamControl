@@ -106,6 +106,8 @@ examples:
   # movement only — nothing is recorded unless something moves
   ./run.sh -motion-only                  until stopped
   ./run.sh -motion-only -duration 8h     eight hours of watching
+  ./run.sh -motion-only -I               ...and type 'sens 0.5' / 'shot' or
+                                         'never' at the watcher as it runs
   ./run.sh -motion-only -sensitivity 0.5 a dim or distant subject
 
 Stop a run with Ctrl-C, or bin/stop for a background one.
