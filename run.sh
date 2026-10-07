@@ -5,14 +5,14 @@
 #   ./run.sh -t 11m        a frame every eleven minutes
 #   ./run.sh -t 1h         a frame every hour
 #
-# Anything else is passed straight through to bin/capture, so --duration,
-# --name, --device and -b behave exactly as they do there.
+# Anything else is passed straight through to bin/capture, so --motion,
+# --duration, --name, --device and -b behave exactly as they do there.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 
 usage() {
   cat <<USAGE
-usage: ./run.sh -t <interval> [capture options]
+usage: ./run.sh [-t <interval>] [capture options]
 
   -t, --time <interval>  time between frames: a number with a unit,
                          s (seconds), m (minutes) or h (hours).
@@ -20,14 +20,26 @@ usage: ./run.sh -t <interval> [capture options]
                          Default: ${INTERVAL_SEC}s, from config.sh
   -ss, --single-shot     take one still with the config.sh FIX_* values and stop
                          (optionally: ./run.sh -ss myshot.jpg)
+  --motion               also shoot when something moves between frames
+                         --sensitivity is a percent (0–100), --cooldown
+                         is in seconds; see bin/capture --help for the rest
+  --motion-only          shoot ONLY on motion: no timed frames, and -t is
+                         not needed (stop with bin/stop, or --duration)
+  --delaySec N           after motion, keep watching N seconds and save the
+                         frame from then — lets the subject walk into shot
+                         (min 0.1, default 0 = save the triggering frame)
   -n, --dry-run          print the capture command instead of running it
   -h, --help             this text
 
 examples:
   ./run.sh -t 10s                       a frame every ten seconds
   ./run.sh -t 11m                       a frame every eleven minutes
-  ./run.sh -t 1h  --duration 28800      hourly, for eight hours
+  ./run.sh -t 1h  --duration 8h         hourly, for eight hours
   ./run.sh -t 30s -b                    every thirty seconds, in the background
+  ./run.sh -t 5m --motion               timed frames, plus one whenever
+                                        something moves
+  ./run.sh --motion-only --duration 8h      record movement for eight hours,
+                                        nothing otherwise
 
 Stop a run with Ctrl-C, or bin/stop for a background one.
 Turn the frames into a movie with bin/make-movie.
@@ -35,16 +47,7 @@ USAGE
 }
 
 # "10s" / "11m" / "1h" / "1.5m" / "90" -> a number of seconds.
-to_seconds() {
-  local v="$1" n u
-  [[ "$v" =~ ^([0-9]+(\.[0-9]+)?)([sSmMhH]?)$ ]] || return 1
-  n="${BASH_REMATCH[1]}"; u="${BASH_REMATCH[3]}"
-  case "${u,,}" in
-    ""|s) awk -v n="$n" 'BEGIN{printf "%.10g", n}'        ;;
-    m)    awk -v n="$n" 'BEGIN{printf "%.10g", n * 60}'   ;;
-    h)    awk -v n="$n" 'BEGIN{printf "%.10g", n * 3600}' ;;
-  esac
-}
+# (the function itself lives in lib/common.sh, shared with bin/capture)
 
 TSPEC=""; DRYRUN=0; SINGLE=0; PASS=()
 while (( $# )); do

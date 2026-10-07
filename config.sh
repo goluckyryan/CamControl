@@ -2,17 +2,69 @@
 # heliosMoving configuration. Every value here can also be overridden on the
 # command line; see `bin/capture --help`.
 
+# --- where things go ---------------------------------------------------------
+# Folder for sessions (frames, logs, movies). Default: sessions/ in the repo.
+# Absolute, or relative to the repo. The env overrides the file, so a one-off
+# run can write elsewhere without editing anything:
+#   SESSIONS_DIR=/mnt/usb/sessions ./run.sh -t 5m
+SESSIONS_DIR="${SESSIONS_DIR:-$HELIOS_ROOT/sessions}"
+
 # --- capture cadence -------------------------------------------------------
 # Seconds between frames. Minimum 16 (twice SHOT_SETTLE_SEC).
 INTERVAL_SEC=300
 
-# Stop automatically after this many seconds. 0 = run until stopped.
+# Stop automatically after this time: a number with s, m or h (e.g. 8h),
+# a bare number is seconds. 0 = run until stopped.
 DURATION_SEC=0
 
 # Seconds of streaming per shot before the frame is kept.
 # Measured on a C920e: a pinned exposure does not take hold until roughly
 # seven seconds of streaming, so anything under that re-meters per frame.
 SHOT_SETTLE_SEC=8
+
+# --- motion ------------------------------------------------------------------
+# bin/capture --motion also watches for motion between the scheduled frames
+# and takes an extra still when something moves. MOTION=1 turns it on for
+# every session instead. The watcher owns the camera only inside the idle
+# window between shots (the device is exclusive), at a small mode.
+MOTION=0
+MOTION_ONLY=0             # 1 = shoot ONLY on motion; no timed frames at all
+MOTION_SENS=2             # percent of the picture that must change to trigger
+MOTION_COOLDOWN_SEC=5     # minimum spacing between any two frames from
+                          # motion. 5 s suits hot capture, where a frame
+                          # costs a file move; with --no-hot each motion
+                          # frame is a full reopen+settle (~10 s), and a
+                          # busy scene will outrun the camera — raise it
+                          # there (20 was the old hot-era default)
+MOTION_MAX_WIDTH=640      # watcher runs the largest mode under this cap
+MOTION_MAX_HEIGHT=360
+MOTION_WARMUP_SEC=2       # ignored at each watch start: the camera re-meters
+                          # on open and the fixed controls land a second or
+                          # two in; either step reads as global motion.
+                          # 2 is enough on the SPL6418 (manual exposure); a
+                          # C920e takes longer to settle — raise if windows
+                          # fire on the watcher's own exposure change.
+MOTION_WINDOW_SEC=600     # longest a single watching stream stays open.
+                          # Every reopen is blind for open+warmup (~3 s), so
+                          # windows are long by design; the reopen also
+                          # re-writes the FIX_* controls
+MOTION_SETTLE_SEC="${MOTION_SETTLE_SEC:-}"   # streaming time for a motion-triggered frame;
+                          # empty = SHOT_SETTLE_SEC (identical settle to
+                          # timed frames). Only used by non-hot watchers —
+                          # a hot frame is the frame itself, no settle
+MOTION_DELAY_SEC="${MOTION_DELAY_SEC:-0}"    # after motion, keep watching N
+                          # seconds and save the frame from THEN — the
+                          # subject walks into shot instead of triggering
+                          # from the edge of frame with a sleeve. 0 = save
+                          # the triggering frame; when nonzero, at least
+                          # 0.1. Hot mode holds the live frame; without it,
+                          # the delay simply postpones the reopen+settle
+MOTION_HOT="${MOTION_HOT:-}"        # empty = auto: on for motion-only, off for
+                          # --motion. On: the watcher streams at the shot
+                          # mode and keeps the newest frame's JPEG on
+                          # /dev/shm, so a trigger is a file move (~0.1 s)
+                          # instead of reopen+settle; costs continuous 4K
+                          # decode/encode CPU while watching
 
 # --- image -----------------------------------------------------------------
 # Upper bound on frame size; the largest mode the camera offers at or below

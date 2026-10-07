@@ -155,6 +155,46 @@ cam_get_num() {
   printf '%s\n' "$v"
 }
 
+# --- per-camera stderr filtering ---------------------------------------------
+#
+# The XIFT/SPL6418 embeds private APP segments in every MJPEG frame. ffmpeg's
+# mjpeg decoder cannot parse them and logs one error per frame, even though
+# the image data itself decodes fine and the frame is written correctly:
+#
+#   [mjpeg @ 0x...] unable to decode APP fields: Invalid data found ...
+#       Last message repeated N times
+#   ioctl(VIDIOC_QBUF): Bad file descriptor   (benign teardown race at -t cutoff)
+#
+# Other cameras (the C920e) do not do this, so the silence is keyed to the
+# card name and only these exact lines disappear; any other ffmpeg output
+# still gets through.
+
+CAM_NOISY_CARD_RE='XIFT|SPL6418'
+
+cam_is_noisy() { [[ "$1" =~ $CAM_NOISY_CARD_RE ]]; }
+
+# stdin->stdout filter. The "Last message repeated" follow-up is dropped only
+# when it directly follows the noise, so it stays visible for any real error.
+cam_hush_stderr() {
+  awk '
+    /unable to decode APP fields/                  { last = 1; next }
+    last && /Last message repeated [0-9]+ times/   { next }
+    /ioctl\(VIDIOC_QBUF\): Bad file descriptor/    { last = 0; next }
+    { last = 0; print; fflush() }'
+}
+
+# Run "$@" with stderr filtered when $1 (the camera's card string) says so.
+# Caller-level redirections apply to this function, and the filter inherits
+# them, so `... >> log 2>&1` keeps logging both streams to the same file.
+cam_run_ffmpeg() {
+  local card="$1"; shift
+  if cam_is_noisy "$card"; then
+    "$@" 2> >(cam_hush_stderr >&2)
+  else
+    "$@"
+  fi
+}
+
 # Apply the fixed parameters from config.sh. No calibration, no readback: what
 # is configured is what is written. A control with no FIX_* value is left on
 # auto rather than frozen at whatever it happened to be showing, so setting

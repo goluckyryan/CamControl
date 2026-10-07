@@ -11,6 +11,7 @@ DEV="${DEVICE:-}"
 [[ -n "$DEV" ]] || DEV="$(cam_detect || true)"
 [[ -n "$DEV" ]] || die "no usable capture device found (run bin/cameras to see why)"
 DEV="$(cam_stable_path "$DEV")"
+CARD="$(cam_card "$DEV")"
 
 read -r FMT W H CAPFPS < <(cam_formats "$DEV" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" 1)
 case "$FMT" in
@@ -25,7 +26,7 @@ cam_apply_static "$DEV" || true
 # one, not the corrupt first buffer this camera emits on open.
 NFRAMES="$(awk -v w="$WARMUP_SEC" -v f="$CAPFPS" 'BEGIN{n=int(w*f); print (n<5?5:n)}')"
 
-ffmpeg -nostdin -loglevel error -y \
+cam_run_ffmpeg "$CARD" ffmpeg -nostdin -loglevel error -y \
   -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
   -i "$DEV" -frames:v "$NFRAMES" -update 1 -q:v 2 "$OUT"
 

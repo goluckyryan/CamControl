@@ -3,6 +3,9 @@
 
 usage: session_update.py SESSION_JSON [--set k=v]... [--controls FILE] [--report]
 
+Keys in --set may be dotted to address nested values, e.g.
+--set motion.triggered=12.
+
 --report recomputes frame stats and gaps using the interval already recorded in
 the file, so the numbers always match how that session was actually captured.
 """
@@ -35,7 +38,13 @@ def main():
         a = args[i]
         if a == "--set":
             k, _, v = args[i + 1].partition("=")
-            data[k] = typed(v)
+            # Dotted keys address nested values ("motion.triggered=3"),
+            # creating intermediate objects as needed.
+            node = data
+            parts = k.split(".")
+            for part in parts[:-1]:
+                node = node.setdefault(part, {})
+            node[parts[-1]] = typed(v)
             i += 2
         elif a == "--controls":
             cf = args[i + 1]

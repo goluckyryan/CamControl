@@ -258,3 +258,182 @@ With the camera:
   than the interval.
 - Locked exposure is dimmer than what auto would pick for a moment-to-moment view.
   That is the tradeoff for consistency; `FIX_EXPOSURE` in `config.sh` overrides it.
+
+## Motion trigger (added later)
+
+`--motion` shoots a frame when the scene changes between the scheduled
+frames. Same folder, same settle path; the schedule anchor never moves.
+
+**The device decides the architecture.** V4L2 ownership is exclusive: while a
+shot's ffmpeg streams, nothing else can watch, and vice versa. So there is no
+watcher daemon — `motion_watch()` fills the idle gap with a *transient*
+small-mode stream (640x480, scaled to 320x180 gray), hands frames to
+`tools/motion_watch.py`, and is gone before the scheduled shot needs the
+camera, ending 2 s early so a decision at the boundary cannot collide with
+the next frame's filename.
+
+**What counts as motion had to survive three hostile cases.**
+A single frame differs from its predecessor for reasons that are not motion
+(a sensor glitch, a lamp switching on, the camera re-metering when the stream
+opens). Each got an answer:
+
+- *Glitch:* comparing each frame only to the one before it lets a one-frame
+  spike produce two consecutive "changed" diffs — before and after. A frame
+  now counts as changed only if it differs from **both** its predecessors,
+  which no single-frame event survives.
+- *Lamp:* a brightness step is a large diff against the two predecessors on
+  exactly one frame, so the two-consecutive rule suppresses it too. A step
+  is a scene change, not motion; that trade is deliberate.
+- *Re-metering:* the watcher re-writes the FIX_* controls mid-stream like a
+  shot does, and ignores `MOTION_WARMUP_SEC` of every window while they
+  take hold.
+
+### Corrections found while building
+
+**1. The trigger never fired because the exit code was swallowed.**
+`main()` returned its status into the void — `if __name__ == "__main__":
+main()` discards it and the process exits 0. Every "no motion" read as
+motion at the shell. Fixed with `sys.exit(main())`. The synthetic test
+suite (static noise, one-frame glitch, moving bar, white noise, lamp step,
+near-peak scene, empty stdin) is what surfaced it: the static case "passed"
+by exiting 0 with no diagnostic.
+
+**2. A fifo deleted too early forks into two fifos.** The watcher used a
+pipeline; pipelines give you one pid for two children, and a triggered
+watch has to kill ffmpeg mid-frame. Reworked as an explicit fifo plus two
+background jobs — and then every window hung. Cause: `rm -f "$fifo"` ran a
+millisecond after starting the jobs, ffmpeg only opens its output once the
+input is up (half a second later), and an open on the *unlinked path*
+re-creates a **second** fifo with `O_CREAT`. Reader and writer met on
+different inodes and both blocked forever. The fifo must survive until
+both sides have opened it. Symptom in the wild: the next scheduled shot
+never started, and sessions ended quietly with one frame missing.
+
+**3. `motion_stop`'s last statement could fail under `set -e`** — a bare
+`[[ -n ... ]] && rm` as the final command — which would abort `finalize`
+halfway. Trailing `|| true`.
+
+Also: a watcher that dies instantly (busy camera) would spin the
+open/probe/stream loop for the whole window; `shot_loop` now notices a
+watch under 2 s old and pauses 5 s.
+
+### Verification performed
+
+With the SPL6418:
+
+- Watcher standalone, static scene: end-of-stream at the deadline, exit 2,
+  no leftovers, no strays.
+- Session, 30 s interval + motion, 80 s: 3 frames on the exact grid, 0
+  triggers, metadata and `bin/status` agree.
+- Trigger path exercised end-to-end with `motion_watch` stubbed to succeed
+  (a hand cannot schedule itself): motion frame lands between its two
+  timed neighbours, `triggered: 1`, no misses, clean stop.
+
+Synthetic (no camera): all seven differ cases as listed above.
+
+### Motion-only mode
+
+`--motion-only`: no clock, no anchor — frames exist only because something
+moved. It is not `--motion` with a huge interval: that would still fire a
+timed frame every hour and call it a day. `motion_loop` replaces
+`shot_loop` entirely.
+
+Two consequences needed designing for, not just flag plumbing:
+
+- **Nothing to bound the watch against.** Timed mode ended each watch at
+  `target - 2`; motion-only has no target, so watching runs in
+  `MOTION_WINDOW_SEC` (60 s) windows that reopen the stream. One endless
+  hold would also mean the FIX_* controls are written only at the very
+  start of a days-long run; the window boundary is where they get re-written.
+- **Every cadence-based report becomes a lie.** `session.json` gains
+  `motion.timed: false`; `bin/status` stops printing an interval, drops
+  the overdue-frame warning (a still scene is not a fault), and computes
+  the disk rate from the frames that actually arrived instead of
+  projecting `3600/interval`.
+
+The interval argument survives in `session.json` as recorded-but-unused
+(what `-t`/default was standing at), so no old tool sees a missing or
+zero key; `make-movie`'s speedup number is simply meaningless for such a
+movie, which the README says rather than the code hides.
+
+## Duration speaks the same clock as -t
+
+`--duration` took raw seconds while `-t` took `10s`/`11m`/`1h` — the same
+program asking for two dialects for the same kind of quantity. `to_seconds`
+moved to `lib/common.sh` and `--duration` (and `DURATION_SEC`) now accept
+both. The parsed value is rounded to whole seconds, because the stop
+timer, `motion_loop`'s deadline and `duration_sec` in `session.json` are
+all integer arithmetic.
+
+## Motion-only felt dead: the latency audit
+
+Reported from the field: motion-only "delayed like 5 s and cannot capture
+anything". The trigger chain itself was proven live (near-zero sensitivity,
+real trigger, real 4K frame), so the complaint was latency and blindness,
+both by design and both too expensive:
+
+- every watch window reopened the stream and discarded `MOTION_WARMUP_SEC`
+  of frames, ~5 s blind per window — and the window was only 60 s, so a
+  tenth of the session was blind, including its very start (the moment
+  someone walks in front of the camera to test it);
+- a triggered frame then streamed the full 8 s settle, so the kept picture
+  was ~10 s after the motion it was named for.
+
+Fixes: windows to 600 s (reopen cost is amortized against the blind cost
+that motivated them); the watcher's control writes moved to half-second
+steps inside 1.5 s so warmup can drop to 2 s; `MOTION_SETTLE_SEC` lets
+motion frames settle faster than timed ones (opt-in — unset keeps every
+frame identical). The camera's `brightness` control turned out not to
+affect a live stream at all (only applied at stream open), which is why
+the first attempted reproduction produced 0.0% change on a moving control:
+the differ correctly reported a static scene. `capture.log` `Broken pipe`
+lines after a trigger are the hand-off, not a fault.
+
+## Hot frames: the trigger saves the picture it already looked at
+
+Asked for motion-only with sub-second capture. No amount of tuning makes
+the reopen-and-settle path reach 1 s — a cold camera open is seconds on its
+own. So the trigger path stopped being a capture: the watcher now streams
+at the SHOT mode and keeps every frame as a JPEG on /dev/shm (-update 1),
+and "taking the picture" became a file move. Measured trigger-to-disk:
+0.00 s (and the frame is the scene at the trigger, not seconds later).
+
+Two findings shaped the ffmpeg line. First, hot frames must not be
+re-encoded: the camera streams MJPEG, its frames ARE JPEGs, so `-c:v copy`
+writes the camera's own bytes — better quality (no generation loss) and
+one-third the CPU (311% -> ~90-100% ffmpeg, plus ~20% differ). Only
+uncompressed-input cameras fall back to `-q:v` encoding the hot frame.
+Second, `-t` cannot go on the input when a two-output ffmpeg runs: it
+reads the input for `-t` seconds and then hangs forever trying to
+"finalize" — each output needs its own output-side `-t` (the same trap
+exists for single-output commands; it just never fires there).
+
+Hot mode is on by default for motion-only (that mode exists to catch the
+moment) and off for hybrid --motion (timed cadence stays king there, and
+the small watcher is cheap to hold across long gaps); --hot/--no-hot
+override both. The hot frame lives on RAM because ffmpeg rewrites it 30
+times a second — that write storm on an SD card would be pure wear.
+
+## --delaySec, and cooldown shrinks to 5
+
+Hot capture made the motion frame instant; the field question changed from
+"how fast can we save" to "which moment do we want". `--delaySec N` (min
+0.1, default 0) saves the frame from N seconds after the trigger — a
+walking subject reaches the middle of the shot instead of triggering it
+with a sleeve at the frame edge.
+
+The first implementation slept in `motion_watch` between the differ's
+trigger exit and the ffmpeg kill, and measured wrong: +0.03 s instead of
++2.5 s. The differ is the fifo's only reader; the moment it exits, ffmpeg
+takes a broken pipe and dies, and the hot frame freezes at the trigger
+instant — a shell-side hold sleeps over a corpse. The hold therefore
+lives in motion_watch.py itself: on a trigger it keeps draining frames
+(ffmpeg keeps writing, the hot frame keeps advancing) until the hold
+elapses or the stream ends, and only then exits 0. The deadline cap comes
+for free the same way: EOF ends the hold, so a scheduled shot is never
+late and the saved frame is at worst the one at window end.
+
+Default `MOTION_COOLDOWN_SEC` drops 20 -> 5: it was sized for the reopen
++ settle cost of a motion frame, and a hot frame costs a file move. The
+hot-vs-cold config comment now says to raise it back with --no-hot, where
+a busy scene can outrun the camera.

@@ -2,11 +2,18 @@
 # Shared helpers: paths, logging, config, validation.
 
 HELIOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SESSIONS_DIR="$HELIOS_ROOT/sessions"
-CURRENT_LINK="$SESSIONS_DIR/current"
 
 # shellcheck source=/dev/null
 [[ -f "$HELIOS_ROOT/config.sh" ]] && source "$HELIOS_ROOT/config.sh"
+
+# The session folder: config.sh may point it elsewhere (an external disk),
+# and because config.sh keeps an already-set environment value, a one-off
+# run can too: SESSIONS_DIR=/mnt/usb/sessions ./run.sh -t 5m. A relative
+# value is taken against the repo, never the caller's cwd — bin/capture and
+# bin/status must agree on the folder no matter where they are run from.
+: "${SESSIONS_DIR:=$HELIOS_ROOT/sessions}"
+[[ "$SESSIONS_DIR" == /* ]] || SESSIONS_DIR="$HELIOS_ROOT/$SESSIONS_DIR"
+CURRENT_LINK="$SESSIONS_DIR/current"
 
 : "${INTERVAL_SEC:=10}"
 : "${DURATION_SEC:=0}"
@@ -16,6 +23,18 @@ CURRENT_LINK="$SESSIONS_DIR/current"
 : "${DEVICE:=}"
 : "${WARMUP_SEC:=4}"
 : "${SHOT_SETTLE_SEC:=8}"
+: "${MOTION:=0}"
+: "${MOTION_ONLY:=0}"
+: "${MOTION_SENS:=2}"
+: "${MOTION_COOLDOWN_SEC:=5}"
+: "${MOTION_DELAY_SEC:=0}"    # hold the hot frame this long after a trigger
+: "${MOTION_MAX_WIDTH:=640}"
+: "${MOTION_MAX_HEIGHT:=360}"
+: "${MOTION_WARMUP_SEC:=2}"
+: "${MOTION_WINDOW_SEC:=600}"  # longest one watching stream stays open
+: "${MOTION_SETTLE_SEC:=}"     # empty = use SHOT_SETTLE_SEC for motion frames
+: "${MOTION_HOT:=}"            # empty = auto (on for motion-only, off for hybrid)
+: "${MOTION_MIN_FPS:=5}"   # internal: lowest framerate the differ is given
 : "${POWER_LINE_FREQ:=2}"
 : "${OUT_FPS:=24}"
 : "${CRF:=18}"
@@ -42,6 +61,19 @@ fcmp() {
     if (op=="lt") exit !(a<b); if (op=="le") exit !(a<=b);
     if (op=="gt") exit !(a>b); if (op=="ge") exit !(a>=b);
     exit 1 }'
+}
+
+# "10s" / "11m" / "1h" / "1.5m" / "90" -> a number of seconds.
+# Shared by run.sh (-t) and bin/capture (--duration), which both speak it.
+to_seconds() {
+  local v="$1" n u
+  [[ "$v" =~ ^([0-9]+(\.[0-9]+)?)([sSmMhH]?)$ ]] || return 1
+  n="${BASH_REMATCH[1]}"; u="${BASH_REMATCH[3]}"
+  case "${u,,}" in
+    ""|s) awk -v n="$n" 'BEGIN{printf "%.10g", n}'        ;;
+    m)    awk -v n="$n" 'BEGIN{printf "%.10g", n * 60}'   ;;
+    h)    awk -v n="$n" 'BEGIN{printf "%.10g", n * 3600}' ;;
+  esac
 }
 
 # Frame filenames carry one-second resolution, so two frames inside the same

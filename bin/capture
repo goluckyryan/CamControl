@@ -4,22 +4,50 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
+source "$HELIOS_ROOT/lib/motion.sh"
 
 usage() {
   cat <<USAGE
 usage: bin/capture [options]
 
   -i, --interval N   seconds between frames (default ${INTERVAL_SEC}, minimum $((SHOT_SETTLE_SEC * 2)))
-  -d, --duration N   stop after N seconds (default ${DURATION_SEC:-0} = until stopped)
+  -d, --duration N   stop after N: a number with a unit, s, m or h
+                     (e.g. 90, 30m, 8h; a bare number is seconds).
+                     Default ${DURATION_SEC:-0} = until stopped
       --device PATH  capture device (default: auto-detect)
       --name NAME    session folder name (default: timestamp)
   -b, --background   detach and return immediately
+      --motion       also shoot when motion is seen between frames
+      --motion-only  shoot ONLY on motion; no timed frames at all, and the
+                     interval is ignored (stop with bin/stop, or use
+                     --duration)
+      --no-motion    off even if MOTION=1 is set in config.sh
+      --sensitivity N   percent of the picture that must change to
+                      trigger, 0 < N <= 100 (default ${MOTION_SENS}; the
+                      measured noise floor with fixed exposure is ~0.003%,
+                      so 0.5 or even 0.2 is safe for dim or distant
+                      subjects; 10+ needs someone crossing the frame)
+      --cooldown N   minimum seconds between motion frames, whole number
+                      (default ${MOTION_COOLDOWN_SEC}); a scheduled frame
+                      also suppresses motion for one cooldown
+      --delaySec N   after motion is seen, keep watching N seconds and save
+                      the frame from then (0 < N, minimum 0.1; default 0 =
+                      save the triggering frame). Lets a walking subject
+                      reach the frame instead of triggering from its edge
+      --hot          watch at full shot resolution and keep the newest frame
+                     in RAM; a trigger saves that frame (sub-second).
+      --no-hot       watch small; a trigger reopens the camera and waits out
+                     the settle (slower, less CPU). Default: hot for
+                     --motion-only, off for --motion; MOTION_HOT in config.sh
+                     also chooses
   -h, --help         this text
 
 Every frame is taken the same way: open the camera, write the FIX_* values
 from config.sh, stream ${SHOT_SETTLE_SEC}s so they take hold, keep the last
 frame, close. No calibration, so the settings are identical on every frame of
-every run and a brightness change is the scene changing.
+every run and a brightness change is the scene changing. Motion frames go
+through exactly this path too, so they are indistinguishable from timed
+frames except in how they are logged.
 
 Ctrl-C ends a foreground session cleanly. Use bin/stop for a background one.
 USAGE
@@ -27,6 +55,7 @@ USAGE
 
 INTERVAL="$INTERVAL_SEC"; DURATION="${DURATION_SEC:-0}"
 DEV_ARG="${DEVICE:-}"; NAME=""; BACKGROUND=0
+MOTION_ON="$MOTION"; MOTION_ONLY="$MOTION_ONLY"
 ORIG_ARGS=("$@")
 
 while (( $# )); do
@@ -36,14 +65,37 @@ while (( $# )); do
     --device)      DEV_ARG="${2:?--device needs a value}"; shift 2 ;;
     --name)        NAME="${2:?--name needs a value}"; shift 2 ;;
     -b|--background) BACKGROUND=1; shift ;;
+    --motion)      MOTION_ON=1; shift ;;
+    --motion-only) MOTION_ON=1; MOTION_ONLY=1; shift ;;
+    --no-motion)   MOTION_ON=0; MOTION_ONLY=0; shift ;;
+    --sensitivity) MOTION_SENS="${2:?--sensitivity needs a value}"; shift 2 ;;
+    --cooldown)    MOTION_COOLDOWN_SEC="${2:?--cooldown needs a value}"; shift 2 ;;
+    --delaySec)    MOTION_DELAY_SEC="${2:?--delaySec needs a value}"; shift 2 ;;
+    --hot)         MOTION_HOT=1; shift ;;
+    --no-hot)      MOTION_HOT=0; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) die "unknown option '$1' (try --help)" ;;
   esac
 done
+# MOTION_ONLY from config.sh implies watching; a command-line --no-motion
+# zeroes both and stays the last word.
+[[ "$MOTION_ONLY" == "1" ]] && MOTION_ON=1
 
 need ffmpeg; need v4l2-ctl
-validate_interval "$INTERVAL"
-[[ "$DURATION" =~ ^[0-9]+$ ]] || die "duration must be a whole number of seconds, got '$DURATION'"
+if [[ "$MOTION_ONLY" == "1" ]]; then
+  # No timed frames: the interval only travels into session.json, but it
+  # still has to survive the number parsing there.
+  [[ "$INTERVAL" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+    || die "interval must be a positive number, got '$INTERVAL'"
+else
+  validate_interval "$INTERVAL"
+fi
+# Same language as -t: a bare number is seconds, s/m/h suffixes allowed.
+# Rounded to whole seconds — the stop timer, motion_loop's deadline and
+# session.json's duration_sec are all integer arithmetic.
+DUR_SECS="$(to_seconds "$DURATION" 2>/dev/null)" \
+  || die "cannot read '$DURATION' as a time: use a number with s, m or h (e.g. 30m, 8h), or 0 for no limit"
+DURATION="$(awk -v d="$DUR_SECS" 'BEGIN{printf "%.0f", d}')"
 
 # A name becomes a directory under sessions/ and a value in session.json, so
 # keep it to characters that cannot traverse a path or need quoting.
@@ -53,9 +105,66 @@ if [[ -n "$NAME" ]]; then
 fi
 
 # Each shot spends SHOT_SETTLE_SEC streaming before it keeps a frame; below
-# roughly twice that, the camera would never be switched off.
-if fcmp "$INTERVAL" lt "$((SHOT_SETTLE_SEC * 2))"; then
+# roughly twice that, the camera would never be switched off. With no timed
+# frames at all, there is no cadence to be too fast for.
+if [[ "$MOTION_ONLY" != "1" ]] && fcmp "$INTERVAL" lt "$((SHOT_SETTLE_SEC * 2))"; then
   die "interval must be at least $((SHOT_SETTLE_SEC * 2))s (each shot streams ${SHOT_SETTLE_SEC}s so the fixed exposure takes hold); got ${INTERVAL}s"
+fi
+
+# A watch is not worth starting if the camera has to be handed back within a
+# few seconds: opening, settling and closing cost about as much as a shot.
+MOTION_IDLE_FLOOR=$((SHOT_SETTLE_SEC + 5))
+
+if [[ "$MOTION_ON" == "1" ]]; then
+  [[ "$MOTION_SENS" =~ ^[0-9]+(\.[0-9]+)?$ ]] && fcmp "$MOTION_SENS" gt 0 && fcmp "$MOTION_SENS" le 100 \
+    || die "--sensitivity must be a percentage greater than 0 and at most 100, got '$MOTION_SENS'"
+  [[ "$MOTION_COOLDOWN_SEC" =~ ^[0-9]+$ ]] \
+    || die "--cooldown must be a whole number of seconds, got '$MOTION_COOLDOWN_SEC'"
+  # Post-trigger hold: 0 disables it; once used it must be at least 0.1 s.
+  [[ "$MOTION_DELAY_SEC" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+    || die "--delaySec must be a number of seconds, got '$MOTION_DELAY_SEC'"
+  if fcmp "$MOTION_DELAY_SEC" gt 0 && fcmp "$MOTION_DELAY_SEC" lt 0.1; then
+    die "--delaySec must be 0 or at least 0.1s, got ${MOTION_DELAY_SEC}s"
+  fi
+  MOTION_DELAY_SUMMARY=""
+  if fcmp "$MOTION_DELAY_SEC" gt 0; then
+    MOTION_DELAY_SUMMARY=", frame delayed ${MOTION_DELAY_SEC}s"
+  fi
+  # Hot capture: the watch stream itself runs at the shot mode and keeps the
+  # newest frame as a JPEG in RAM (/dev/shm), so a trigger is a ~0.1 s file
+  # move instead of a camera reopen plus a multi-second settle. Motion-only
+  # sessions exist to catch the moment, so it is on there by default; hybrid
+  # sessions watch small and cheap by default, because a timed shot is due
+  # anyway and MOTION_SETTLE_SEC already covers freshness there.
+  if [[ -z "${MOTION_HOT:-}" ]]; then
+    MOTION_HOT="$MOTION_ONLY"
+  fi
+  [[ "$MOTION_HOT" == "auto" ]] && MOTION_HOT="$MOTION_ONLY"
+  case "$MOTION_HOT" in
+    0|1) ;;
+    *) die "--hot/-no-hot/MOTION_HOT must be 0 or 1, got '$MOTION_HOT'" ;;
+  esac
+  if [[ "$MOTION_HOT" == "1" && ! -w /dev/shm ]]; then
+    warn "motion: /dev/shm is not writable; motion frames fall back to the reopen-and-settle path"
+    MOTION_HOT=0
+  fi
+  # Settle for motion-triggered frames: unset/empty means the timed settle.
+  M_SETTLE="${MOTION_SETTLE_SEC:-}"
+  if [[ -z "$M_SETTLE" ]]; then
+    M_SETTLE="$SHOT_SETTLE_SEC"
+  else
+    [[ "$M_SETTLE" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+      || die "MOTION_SETTLE_SEC must be a number of seconds, got '$M_SETTLE'"
+    fcmp "$M_SETTLE" ge 2 \
+      || die "MOTION_SETTLE_SEC must be at least 2s (the fixed controls are written over the first ~1.5s of the stream); got ${M_SETTLE}s"
+  fi
+  # The watchable gap is what the interval leaves after a shot and its
+  # hand-back margin; below the floor no window ever opens. Motion-only
+  # spends the whole session watching, so the interval cannot starve it.
+  if [[ "$MOTION_ONLY" != "1" ]] \
+     && fcmp "$INTERVAL" lt "$((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))"; then
+    warn "interval ${INTERVAL}s leaves no idle window to watch in (needs roughly $((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))s or more); motion frames will never fire"
+  fi
 fi
 
 # What will be written to the camera on every shot, straight from config.sh.
@@ -99,6 +208,20 @@ case "$FMT" in
   *) IFMT="$(printf '%s' "$FMT" | tr '[:upper:]' '[:lower:]')" ;;
 esac
 
+# Probe the watcher's mode now so an unusable camera is a startup error,
+# not a warn on every idle window. A hot watch simply uses the shot mode
+# probed above; only the small watcher needs its own pick.
+MOTION_MODE=""
+if [[ "$MOTION_ON" == "1" ]]; then
+  if [[ "${MOTION_HOT:-0}" == "1" ]]; then
+    MOTION_MODE="$FMT ${W}x${H} @ ${CAPFPS} fps, newest frame held in RAM"
+  else
+    read -r MFMT MW MH MFPS < <(cam_motion_mode "$DEV") \
+      || die "motion: $DEV advertises no capture mode at or below ${MOTION_MAX_WIDTH}x${MOTION_MAX_HEIGHT} (raise MOTION_MAX_WIDTH/HEIGHT in config.sh)"
+    MOTION_MODE="$MFMT ${MW}x${MH} @ ${MFPS} fps"
+  fi
+fi
+
 # --- session ---------------------------------------------------------------
 mkdir -p "$SESSIONS_DIR"
 check_space "$SESSIONS_DIR"
@@ -117,16 +240,30 @@ info "session   : $SID"
 info "device    : $DEV  ($CARD)"
 info "mode      : $FMT ${W}x${H} @ ${CAPFPS} fps, ${SHOT_SETTLE_SEC}s per shot"
 info "fixed     : ${FIXED_SUMMARY:-none — camera meters each shot}"
-info "interval  : ${INTERVAL}s$( [[ "$DURATION" != 0 ]] && printf ', stopping after %ss' "$DURATION" )"
+if [[ "$MOTION_ONLY" == "1" ]]; then
+  info "interval  : none — frames come from motion only$( [[ "$DURATION" != 0 ]] && printf ', stopping after %ss' "$DURATION" )"
+else
+  info "interval  : ${INTERVAL}s$( [[ "$DURATION" != 0 ]] && printf ', stopping after %ss' "$DURATION" )"
+fi
+if [[ "$MOTION_ON" == "1" ]]; then
+  if [[ "$MOTION_ONLY" == "1" ]]; then
+    info "motion    : ONLY — sens ${MOTION_SENS}%, cooldown ${MOTION_COOLDOWN_SEC}s${MOTION_DELAY_SUMMARY}, watching $MOTION_MODE"
+    [[ "$DURATION" == "0" ]] && warn "motion only: the camera records nothing until something moves; stop with bin/stop or set --duration"
+  else
+    info "motion    : on — sens ${MOTION_SENS}%, cooldown ${MOTION_COOLDOWN_SEC}s${MOTION_DELAY_SUMMARY}, watching $MOTION_MODE"
+  fi
+fi
 info "frames    : $FRAMES"
 
 # --- lifecycle -------------------------------------------------------------
 STOP=0; FFPID=""; TIMER=""; SLEEPPID=""; SHOTS=0; MISSES=0; SESSION_LIVE=0
+MOTION_SHOTS=0; LAST_SHOT=0
 
 on_signal() {
   STOP=1
   [[ -n "$FFPID" ]] && kill -TERM "$FFPID" 2>/dev/null || true
   [[ -n "$SLEEPPID" ]] && kill -TERM "$SLEEPPID" 2>/dev/null || true
+  motion_stop
 }
 trap on_signal INT TERM
 
@@ -135,6 +272,7 @@ finalize() {
   [[ -n "$TIMER" ]] && kill "$TIMER" 2>/dev/null || true
   [[ -n "$SLEEPPID" ]] && kill "$SLEEPPID" 2>/dev/null || true
   [[ -n "$FFPID" ]] && kill -TERM "$FFPID" 2>/dev/null || true
+  motion_stop
   wait 2>/dev/null || true
   rm -f "$SDIR/capture.pid" "$SDIR/.shot.jpg"
   [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$SDIR" ]] && rm -f "$CURRENT_LINK"
@@ -149,6 +287,7 @@ finalize() {
     python3 "$HELIOS_ROOT/tools/session_update.py" "$META" \
       --set "ended=$(date '+%Y-%m-%d %H:%M:%S')" \
       --set "misses=$MISSES" \
+      --set "motion.triggered=$MOTION_SHOTS" \
       --controls "$SDIR/controls.json" --report || true
   fi
   local n; n="$(find "$FRAMES" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l)"
@@ -163,10 +302,11 @@ echo $$ > "$SDIR/capture.pid"
 # Values go in as arguments, never interpolated into the program text: a card
 # string or session name holding a quote would otherwise be a syntax error.
 python3 - "$META" "$SID" "$DEV" "$CARD" "$FMT" "$W" "$H" "$CAPFPS" \
-                  "$INTERVAL" "$DURATION" "$JPEG_QUALITY" <<'PY' || die "could not write $META"
+                  "$INTERVAL" "$DURATION" "$JPEG_QUALITY" \
+                  "$MOTION_ON" "$MOTION_ONLY" "$MOTION_SENS" "$MOTION_COOLDOWN_SEC" "$MOTION_DELAY_SEC" <<'PY' || die "could not write $META"
 import json, sys, datetime
 
-path, sid, dev, card, fmt, w, h, capfps, iv, dur, q = sys.argv[1:12]
+path, sid, dev, card, fmt, w, h, capfps, iv, dur, q, motion_on, motion_only, sens, cooldown, delay = sys.argv[1:17]
 
 
 def num(s):
@@ -185,6 +325,14 @@ json.dump({
   "interval_sec": num(iv),
   "duration_sec": int(dur),
   "jpeg_quality": int(q),
+  "motion": {
+    "enabled": motion_on == "1",
+    "timed": motion_on == "1" and motion_only != "1",
+    "sensitivity": num(sens),
+    "cooldown_sec": int(cooldown),
+    "delay_sec": num(delay),
+    "triggered": 0,
+  },
   "started": datetime.datetime.now().isoformat(sep=" ", timespec="seconds"),
   "ended": None, "frames": 0, "misses": 0, "controls": {}, "gaps": [],
 }, open(path, "w"), indent=2, sort_keys=True)
@@ -218,12 +366,16 @@ PY
 # One still: open the camera, write the fixed values once the stream is up,
 # keep the last frame. -update 1 overwrites the same file on every frame, so
 # what survives is a frame taken after the values have taken hold.
+# The settle can be overridden (second argument) — a motion frame may want
+# to be captured fresher than a time-lapse frame.
 take_shot() {
-  local out="$1" tmp="$SDIR/.shot.jpg" i
+  local out="$1" tmp="$SDIR/.shot.jpg" i settle="${2:-$SHOT_SETTLE_SEC}"
   rm -f "$tmp"
-  ffmpeg -nostdin -loglevel error -y \
+  # Same card-name scoping as bin/shot: only this camera's APP-field noise is
+  # filtered out of the log, real ffmpeg errors still land in it.
+  cam_run_ffmpeg "$CARD" ffmpeg -nostdin -loglevel error -y \
     -f v4l2 -input_format "$IFMT" -video_size "${W}x${H}" -framerate "$CAPFPS" \
-    -i "$DEV" -t "$SHOT_SETTLE_SEC" -update 1 -q:v "$JPEG_QUALITY" \
+    -i "$DEV" -t "$settle" -update 1 -q:v "$JPEG_QUALITY" \
     "$tmp" >> "$LOG" 2>&1 &
   FFPID=$!
 
@@ -243,30 +395,157 @@ take_shot() {
   mv -f "$tmp" "$out"
 }
 
+# Keep a motion frame: with the hot watcher, motion_watch has already frozen
+# the triggering frame on /dev/shm and killed ffmpeg before returning, so
+# saving it is a file move and the picture is the scene as the differ saw it.
+# Without hot mode (or if the held frame went missing), fall back to a real
+# shot — slower, and the mover may well have left by the time it lands.
+motion_frame() {
+  local out="$1"
+  if [[ -n "${MOTION_HOT_FILE:-}" && -s "$MOTION_HOT_FILE" ]]; then
+    mv -f "$MOTION_HOT_FILE" "$out" || return 1
+    MOTION_HOT_FILE=""
+    [[ -n "${MOTION_HOT_DIR:-}" ]] && rm -rf "$MOTION_HOT_DIR" || true
+    MOTION_HOT_DIR=""
+    return 0
+  fi
+  take_shot "$out" "$M_SETTLE"
+}
+
+# Frame filenames are one-second timestamps and take_shot overwrites, so a
+# motion frame landing in the same second as its scheduled neighbour would
+# silently erase it. Step forward rather than collide.
+unique_frame_name() {
+  local t i out
+  for i in 0 1 2; do
+    t="$(date -d "@$(( $(date +%s) + i ))" '+%Y%m%d-%H%M%S')"
+    out="$FRAMES/$t.jpg"
+    [[ -e "$out" ]] || { printf '%s\n' "$out"; return 0; }
+  done
+  printf '%s\n' "$out"
+}
+
 # Fire on a schedule anchored to the session start, so the time each shot takes
-# cannot accumulate into drift across a multi-day run.
+# cannot accumulate into drift across a multi-day run. Motion watching fills
+# the idle gaps; it never moves the anchor, so the grid is the same whether or
+# not anything moves.
 shot_loop() {
-  local n=0 start target now delay out
+  local n=0 start target now delay out watch_end mute nowt
   start="$(date +%s)"
   while (( STOP == 0 )); do
     target="$(awk -v s="$start" -v n="$n" -v i="$INTERVAL" 'BEGIN{ printf "%.0f", s + n * i }')"
     now="$(date +%s)"
     delay=$(( target - now ))
     if (( delay > 0 )); then
-      sleep "$delay" & SLEEPPID=$!
-      wait "$SLEEPPID" 2>/dev/null || true
-      SLEEPPID=""
+      if [[ "$MOTION_ON" == "1" ]] && (( delay >= MOTION_IDLE_FLOOR )); then
+        # Stop watching a few seconds early: whatever the watch decided, the
+        # scheduled shot needs the camera back cleanly, and a decision right
+        # at the boundary is how two shots collide in the same second.
+        watch_end=$(( target - 2 ))
+        # One frame of any kind per cooldown window, and the handover from
+        # watcher to shot costs a second or two on its own.
+        mute=$(( LAST_SHOT + MOTION_COOLDOWN_SEC + 2 ))
+        nowt="$(date +%s)"
+        if (( mute > nowt )) && (( mute < watch_end )); then
+          sleep $(( mute - nowt )) & SLEEPPID=$!
+          wait "$SLEEPPID" 2>/dev/null || true
+          SLEEPPID=""
+        fi
+        if (( STOP == 0 )) && (( $(date +%s) < watch_end )); then
+          local wrc=0 w0; w0="$(date +%s)"
+          motion_watch "$DEV" "$watch_end" || wrc=$?
+          if (( wrc == 0 )); then
+            out="$(unique_frame_name)"
+            if motion_frame "$out"; then
+              MOTION_SHOTS=$((MOTION_SHOTS + 1))
+              LAST_SHOT="$(date +%s)"
+              info "motion      : $(basename "$out")"
+            elif (( STOP == 0 )); then
+              MISSES=$((MISSES + 1))
+              warn "motion shot produced no frame — see $LOG"
+            fi
+          elif (( $(date +%s) - w0 < 2 )) && (( STOP == 0 )); then
+            # The watcher died almost as soon as it started. Without a pause
+            # here a broken watcher would spin the camera open and closed for
+            # the rest of the window.
+            sleep 5 & SLEEPPID=$!
+            wait "$SLEEPPID" 2>/dev/null || true
+            SLEEPPID=""
+          fi
+        fi
+        (( STOP )) && break
+        continue   # re-evaluate against the same target
+      fi
+      if (( delay > 0 )); then
+        sleep "$delay" & SLEEPPID=$!
+        wait "$SLEEPPID" 2>/dev/null || true
+        SLEEPPID=""
+      fi
     fi
     (( STOP )) && break
 
-    out="$FRAMES/$(date '+%Y%m%d-%H%M%S').jpg"
+    out="$(unique_frame_name)"
     if take_shot "$out"; then
       SHOTS=$((SHOTS + 1))
+      LAST_SHOT="$(date +%s)"
     elif (( STOP == 0 )); then
       MISSES=$((MISSES + 1))
       warn "shot $((n + 1)) produced no frame — see $LOG"
     fi
     n=$(( n + 1 ))
+  done
+}
+
+# Motion-only: nothing fires on the clock. Watching runs in bounded windows
+# (MOTION_WINDOW_SEC) rather than one open-ended stream, so the camera is
+# released periodically, the FIX_* values are re-written, and a wedged
+# watcher can only stall the session for one window. The duration timer
+# still ends the session; with no duration it runs until stopped.
+motion_loop() {
+  local out w0 wrc watch_end nowt mute
+  local dur_end=$(( DURATION > 0 ? $(date +%s) + DURATION : 0 ))
+  LAST_SHOT=0
+  while (( STOP == 0 )); do
+    nowt="$(date +%s)"
+    if (( dur_end > 0 && nowt >= dur_end - 3 )); then
+      # Too close to the stop time to hand the camera to a watcher that
+      # would only just open; wait out the timer.
+      sleep $(( dur_end - nowt )) & SLEEPPID=$!
+      wait "$SLEEPPID" 2>/dev/null || true
+      SLEEPPID=""
+      break
+    fi
+    watch_end=$(( nowt + MOTION_WINDOW_SEC ))
+    (( dur_end > 0 && watch_end > dur_end - 3 )) && watch_end=$(( dur_end - 3 ))
+
+    wrc=0; w0="$nowt"
+    motion_watch "$DEV" "$watch_end" || wrc=$?
+    (( STOP )) && break
+
+    if (( wrc == 0 )); then
+      out="$(unique_frame_name)"
+      if motion_frame "$out"; then
+        MOTION_SHOTS=$((MOTION_SHOTS + 1))
+        LAST_SHOT="$(date +%s)"
+        info "motion      : $(basename "$out")"
+        mute=$(( LAST_SHOT + MOTION_COOLDOWN_SEC + 2 ))
+        nowt="$(date +%s)"
+        if (( mute > nowt )); then
+          sleep $(( mute - nowt )) & SLEEPPID=$!
+          wait "$SLEEPPID" 2>/dev/null || true
+          SLEEPPID=""
+        fi
+      elif (( STOP == 0 )); then
+        MISSES=$((MISSES + 1))
+        warn "motion shot produced no frame — see $LOG"
+      fi
+    elif (( $(date +%s) - w0 < 2 )) && (( STOP == 0 )); then
+      # The watcher died almost as soon as it started; pause, or a dead
+      # watcher would spin the camera open and closed forever.
+      sleep 5 & SLEEPPID=$!
+      wait "$SLEEPPID" 2>/dev/null || true
+      SLEEPPID=""
+    fi
   done
 }
 
@@ -278,4 +557,8 @@ fi
 
 SESSION_LIVE=1
 write_fixed_controls
-shot_loop
+if [[ "$MOTION_ONLY" == "1" ]]; then
+  motion_loop
+else
+  shot_loop
+fi

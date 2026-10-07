@@ -14,6 +14,8 @@ META="$SDIR/session.json"
 # default on the next line could apply, and print nothing at all.
 [[ -f "$META" ]] || warn "no session.json in $SDIR (interrupted session?); reporting from the frames alone"
 iv="$(session_get "$META" interval_sec || true)"; : "${iv:=$INTERVAL_SEC}"
+# A motion-only session has no cadence to report against.
+mtimed="$(session_get "$META" motion.timed || true)"; : "${mtimed:=True}"
 
 echo "session   : $(basename "$SDIR")"
 if session_is_running "$SDIR"; then
@@ -23,11 +25,20 @@ else
 fi
 echo "device    : $(session_get "$META" device || true) ($(session_get "$META" card || true))"
 echo "mode      : $(session_get "$META" format) $(session_get "$META" width)x$(session_get "$META" height)"
-echo "interval  : ${iv}s"
+if [[ "$mtimed" == "True" ]]; then
+  echo "interval  : ${iv}s"
+else
+  echo "interval  : none (motion only)"
+fi
 echo "started   : $(session_get "$META" started)"
 
 misses="$(session_get "$META" misses || true)"
 [[ -n "$misses" && "$misses" != "0" ]] && echo "misses    : ${C_YEL}${misses}${C_OFF} (shots that produced no frame)"
+
+if [[ "$(session_get "$META" motion.enabled || true)" == "True" ]]; then
+  label=$([[ "$mtimed" == "True" ]] && echo "on" || echo "motion only — no timed frames")
+  echo "motion    : $label (sens $(session_get "$META" motion.sensitivity)%, cooldown $(session_get "$META" motion.cooldown_sec)s), triggered $(session_get "$META" motion.triggered || echo 0)"
+fi
 
 echo
 python3 "$HELIOS_ROOT/tools/session_report.py" "$SDIR/frames" "$iv"
@@ -38,13 +49,22 @@ if session_is_running "$SDIR"; then
   if (( n > 1 )); then
     bytes="$(du -sb "$SDIR/frames" | cut -f1)"
     per=$(( bytes / n ))
-    hourly=$(awk -v p="$per" -v iv="$iv" 'BEGIN{printf "%.0f", p*3600/iv/1e6}')
     echo
-    echo "rate      : ~${hourly} MB/hour at ${iv}s ($(awk -v iv="$iv" 'BEGIN{printf "%.0f", 3600/iv}') frames/hour)"
+    if [[ "$mtimed" == "True" ]]; then
+      hourly=$(awk -v p="$per" -v iv="$iv" 'BEGIN{printf "%.0f", p*3600/iv/1e6}')
+      echo "rate      : ~${hourly} MB/hour at ${iv}s ($(awk -v iv="$iv" 'BEGIN{printf "%.0f", 3600/iv}') frames/hour)"
+    else
+      # Motion has no cadence to assume: measure the arrival so far.
+      span=$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' -printf '%T@\n' | sort -n |
+             awk 'NR==1{f=$1} END{printf "%.0f", $1 - f}')
+      (( span > 0 )) && echo "rate      : ~$(awk -v p="$per" -v s="$span" 'BEGIN{printf "%.0f", p*3600/s/1e6}') MB/hour, $(awk -v n="$n" -v s="$span" 'BEGIN{printf "%.1f", n*3600/s}') frames/hour so far"
+    fi
     echo "free      : $(free_mb "$SDIR") MB"
   fi
   last="$(find "$SDIR/frames" -maxdepth 1 -name '*.jpg' -printf '%T@\n' | sort -n | tail -1)"
-  if [[ -n "$last" ]]; then
+  # For a motion-only session a long silence is not a fault, it is the scene
+  # being still; there is no expected cadence to be overdue against.
+  if [[ -n "$last" && "$mtimed" == "True" ]]; then
     age=$(awk -v l="$last" 'BEGIN{printf "%.0f", systime()-l}')
     (( age > 3 * ${iv%.*} )) && warn "last frame was ${age}s ago — expected one every ${iv}s"
   fi
