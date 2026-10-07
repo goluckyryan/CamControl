@@ -437,3 +437,47 @@ Default `MOTION_COOLDOWN_SEC` drops 20 -> 5: it was sized for the reopen
 + settle cost of a motion frame, and a hot frame costs a file move. The
 hot-vs-cold config comment now says to raise it back with --no-hot, where
 a busy scene can outrun the camera.
+
+## One dash, and a console for a session already running
+
+The flag rule is now stated once and obeyed everywhere: every option takes a
+single dash, long names included, so `-motion` and `--motion` are not two flags
+of which one silently works. `die_opt` in `lib/common.sh` owns the rejection,
+which is what lets a typed `--duration` be told the rule instead of being told
+"unknown option". `v4l2-ctl` and ffmpeg keep their double dashes; those are not
+our flags.
+
+`-I` (`-interactive`) reads commands from the terminal while a session runs.
+The mode is fixed for the whole run — timed, motion and motion-only each decide
+their own cadence and none can be switched into another — so what it can change
+is the tuning: `shot`, `delay`, `sens`, `cooldown`, `quality`, the `FIX_*`
+values, `more T` and `never` for the end time, `status`, `stop`.
+
+The shape of it is one file per typed command in `<session>/cmd/`, named by a
+counter, and a `SIGUSR1` to the session. Not a pipe the session polls, because
+the session spends its waiting time asleep or inside the watcher and both have
+to be woken rather than read; not an append to one queue, because a reader that
+truncates can eat a line; not a rename-onto-a-path, because a counter is
+simpler and sorts in the order things were typed. The trap does one thing: it
+removes the reason to wait, by killing the sleep and ending the watch window,
+which returns the loop to its top where the command is read and obeyed. It
+never touches ffmpeg — a frame already streaming is finished, not thrown away,
+which is also why `-duration` is a deadline the schedule stays inside rather
+than a signal that cuts a shot off. `finalize` records what the run actually
+used over what it started with.
+
+Two bugs fell out of making that reliable. The `( sleep N; kill -TERM $$ )&`
+duration timer is gone: when the kill arrived the sleeper had already gone, so
+nothing reaped it and the EXIT trap parked in `wait` for the rest of the
+duration — a `--duration` session that could not be stopped. And the watcher's
+tracked pid was a shell rather than ffmpeg, so stopping a watcher orphaned the
+real process onto the camera; see the commit that lands with this.
+
+Bash behaviour this all rests on, each one found by it failing quietly:
+a backgrounded job's stdin is /dev/null, so the reader needs `</dev/tty` or
+`<&0` written out; a forked subshell inherits both `set -e` and the traps, so
+`read -t` must end `&& rc=0 || rc=$?` or the first timeout kills the console; a
+timed-out `read` hands back the partial line and does not put it back, so typed
+characters are accumulated, not lost; `if ! cmd` reports the negated status, not
+`cmd`'s; and a failing last command inside a trap or an `if` body ends the
+shell, which is why `drain_cmds` finishes with an explicit `return 0`.

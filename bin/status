@@ -3,6 +3,11 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
+case "${1:-}" in
+  -h|-help) echo "usage: bin/status [session]" >&2; exit 0 ;;
+  -?*) die_opt "$1" ;;
+esac
+
 if ! SDIR="$(resolve_session "${1:-}")"; then
   info "no sessions yet — start one with: bin/capture"
   exit 0
@@ -37,7 +42,18 @@ misses="$(session_get "$META" misses || true)"
 
 if [[ "$(session_get "$META" motion.enabled || true)" == "True" ]]; then
   label=$([[ "$mtimed" == "True" ]] && echo "on" || echo "motion only — no timed frames")
-  echo "motion    : $label (sens $(session_get "$META" motion.sensitivity)%, cooldown $(session_get "$META" motion.cooldown_sec)s), triggered $(session_get "$META" motion.triggered || echo 0)"
+  echo "motion    : $label (sens $(session_get "$META" motion.sensitivity)%, cooldown $(session_get "$META" motion.cooldown_sec)s, hold $(session_get "$META" motion.delay_sec)s), triggered $(session_get "$META" motion.triggered || echo 0)"
+fi
+# Only an -I run can disagree with config.sh, so say which this was. While it
+# is still going the numbers above are the ones it started with: the retuned
+# values are written back when the session closes, and the typeable 'status'
+# command is what reports them live.
+if [[ "$(session_get "$META" interactive || true)" == "True" ]]; then
+  if session_is_running "$SDIR"; then
+    echo "console   : yes — retuned values land here when it ends ('status' types live ones)"
+  else
+    echo "console   : yes — settings above are as retuned during the run"
+  fi
 fi
 
 echo

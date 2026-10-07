@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Update a session.json in place.
 
-usage: session_update.py SESSION_JSON [--set k=v]... [--controls FILE] [--report]
+usage: session_update.py SESSION_JSON [-set k=v]... [-controls FILE] [-report]
 
-Keys in --set may be dotted to address nested values, e.g.
---set motion.triggered=12.
+Keys in -set may be dotted to address nested values, e.g.
+-set motion.triggered=12.
 
---report recomputes frame stats and gaps using the interval already recorded in
+-report recomputes frame stats and gaps using the interval already recorded in
 the file, so the numbers always match how that session was actually captured.
+Flags take one dash, like every other command in this repo.
 """
 import json
 import os
@@ -36,7 +37,7 @@ def main():
     i = 0
     while i < len(args):
         a = args[i]
-        if a == "--set":
+        if a == "-set":
             k, _, v = args[i + 1].partition("=")
             # Dotted keys address nested values ("motion.triggered=3"),
             # creating intermediate objects as needed.
@@ -46,13 +47,13 @@ def main():
                 node = node.setdefault(part, {})
             node[parts[-1]] = typed(v)
             i += 2
-        elif a == "--controls":
+        elif a == "-controls":
             cf = args[i + 1]
             if os.path.exists(cf):
                 with open(cf) as f:
                     data["controls"] = json.load(f)
             i += 2
-        elif a == "--report":
+        elif a == "-report":
             frames = os.path.join(os.path.dirname(os.path.abspath(path)), "frames")
             rep = build(frames, float(data.get("interval_sec") or 10))
             data["frames"] = rep["count"]
