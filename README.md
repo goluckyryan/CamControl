@@ -1,17 +1,50 @@
-# heliosMoving
+# CamControl
 
-Time-lapse rig for watching **Helios** move: take a still every few minutes with
-fixed camera settings, then turn the stills into a movie.
+Camera control for a moving machine. The project started as a
+time-lapse rig for watching **Helios** move — take a still every few minutes
+with fixed camera settings, then turn the stills into a movie — and has grown
+into the general camera-control tool it is now: fixed-parameter stills,
+motion-triggered frames, and the movie tools around them. The `helios_` session
+filenames are the name it was born under.
 
-Built and tested on a Raspberry Pi 5 (Debian 13) with a **Logitech C920e** and a
-**4K SPL6418** (a Philips 4000-series unit; it enumerates as `XIFT SPL6418`).
-Nothing needs installing — it uses ffmpeg, v4l2-ctl and Python 3, all already present.
+Built and tested on a Raspberry Pi 5 (Debian 13) with a **Logitech C920e**, a
+**Logitech Brio 100** and a **4K SPL6418** (a Philips 4000-series unit; it
+enumerates as `XIFT SPL6418`). The full list is in [Tested cameras](#tested-cameras).
+The only things it needs are ffmpeg, v4l2-ctl and Python 3 — see
+[Requirements](#requirements) for the packages.
+
+## Requirements
+
+| | |
+|---|---|
+| ffmpeg | `apt install ffmpeg` — capture, the stills, and every movie |
+| v4l2-ctl | `apt install v4l-utils` — device detection and the `FIX_*` camera controls |
+| Python 3 | stdlib only — f-strings and `pathlib` are the newest features used, so anything 3.6+ works (Debian 13 / Ubuntu ship 3.11+) |
+| Pillow | **optional** — only `bin/folder-movie`, and only when a folder mixes image formats: `apt install python3-pil` (or `pip install Pillow`) |
+
+There is no venv and no `requirements.txt`: the shell tools fail fast with a
+`need ffmpeg`-style message when a binary is missing, and the Python tools
+import nothing third-party except that one optional `PIL`.
 
 Capture resolution is not configured per camera: `MAX_WIDTH`/`MAX_HEIGHT` in
 `config.sh` are a **ceiling**, and the largest mode at or below it is chosen. The
 shipped default is 2560x1440 — the largest honest 16:9 mode of the SPL6418,
 whose "4K" is only an in-camera upscale (see Troubleshooting) — and a 1080p
 camera like the C920e still shoots 1080p without changing anything.
+
+## Tested cameras
+
+These are the cameras the rig has actually run on. Any camera auto-detects via
+`bin/cameras`; this is the set where the quirks below are already worked around.
+
+| camera | honest max mode | notes |
+|---|---|---|
+| Logitech C920e | 1920×1080 | clean MJPEG; full auto/manual controls |
+| Logitech Brio 100 | 1920×1080 | true 1080p; fixed focus; per-frame APP noise hushed by card name |
+| 4K SPL6418 (Philips) | 2560×1440 | “4K” is an in-camera upscale; exposure manual-only; white balance is an index, not Kelvin |
+
+Per-camera control ranges and the silent-clamp gotcha are in
+[The ranges differ between cameras](#the-ranges-differ-between-cameras).
 
 ## Quickstart
 
@@ -71,13 +104,13 @@ camera exposure is always manual whether or not you pin it.
 They are not even the same *kind* of number. Run
 `v4l2-ctl -d /dev/video0 --list-ctrls-menus` for the camera actually attached:
 
-| control | C920e | SPL6418 |
-|---|---|---|
-| `exposure_time_absolute` | 3..2047 | 1..12287, but only moves the image over roughly **1..30**; flat above that |
-| `white_balance_temperature` | 2000..6500, in Kelvin | **1..5, an index** — not Kelvin |
-| `focus_absolute` | 0..250 step 5 | **absent**; focus is fixed and `FIX_FOCUS` is ignored |
-| `gain` | 0..255 | 0..255 |
-| `auto_exposure` | auto or manual | **manual only** |
+| control | C920e | Brio 100 | SPL6418 |
+|---|---|---|---|
+| `exposure_time_absolute` | 3..2047 | 5..2500 | 1..12287, but only moves the image over roughly **1..30**; flat above that |
+| `white_balance_temperature` | 2000..6500, in Kelvin | 2800..7500, in Kelvin | **1..5, an index** — not Kelvin |
+| `focus_absolute` | 0..250 step 5 | **absent**; fixed focus | **absent**; focus is fixed and `FIX_FOCUS` is ignored |
+| `gain` | 0..255 | 0..255 | 0..255 |
+| `auto_exposure` | auto or manual | auto or manual | **manual only** |
 
 The white balance row is the one that bites. A driver **clamps an out-of-range
 value silently** — no error, no non-zero exit — so `FIX_WB="4500"` written to an
@@ -561,3 +594,7 @@ backing hardware on this board and all fail at runtime.
 That is slow but not prohibitive at 4K: measured ~2.6 frames/s at `crf 18 preset
 medium`, so a 288-frame day encodes in under two minutes and a 2880-frame day in
 about twenty. Drop to `-preset fast` if that matters.
+
+The repo is still named after its first job: `HELIOS_ROOT` in `lib/common.sh`
+is the repo root, and sessions are written out as `helios_<id>.mp4` — the
+time-lapse origin, kept as history.

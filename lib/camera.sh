@@ -157,9 +157,10 @@ cam_get_num() {
 
 # --- per-camera stderr filtering ---------------------------------------------
 #
-# The XIFT/SPL6418 embeds private APP segments in every MJPEG frame. ffmpeg's
-# mjpeg decoder cannot parse them and logs one error per frame, even though
-# the image data itself decodes fine and the frame is written correctly:
+# The XIFT/SPL6418 and the Brio 100 embed private APP segments in every MJPEG
+# frame. ffmpeg's mjpeg decoder cannot parse them and logs one error per frame,
+# even though the image data itself decodes fine and the frame is written
+# correctly:
 #
 #   [mjpeg @ 0x...] unable to decode APP fields: Invalid data found ...
 #       Last message repeated N times
@@ -169,7 +170,7 @@ cam_get_num() {
 # card name and only these exact lines disappear; any other ffmpeg output
 # still gets through.
 
-CAM_NOISY_CARD_RE='XIFT|SPL6418'
+CAM_NOISY_CARD_RE='XIFT|SPL6418|Brio 100'
 
 cam_is_noisy() { [[ "$1" =~ $CAM_NOISY_CARD_RE ]]; }
 

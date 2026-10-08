@@ -107,7 +107,7 @@ WARMUP_SEC=4
 # --list-ctrls-menus` prints the real ones, and a control the camera does not
 # have at all is skipped. An out-of-range value is clamped by the driver with
 # no error, so capture warns when one is written -- see cam_set_checked.
-FIX_EXPOSURE="350"     # exposure_time_absolute; 3..2047 C920e, 1..12287 SPL6418
+FIX_EXPOSURE="150"     # exposure_time_absolute; 3..2047 C920e, 1..12287 SPL6418
 FIX_WB=""              # white_balance_temperature; Kelvin 2000..6500 on a
                        # C920e, but an index 1..5 on the SPL6418 -- not Kelvin
 FIX_FOCUS=""           # focus_absolute, 0..250 step 5; absent on the SPL6418
