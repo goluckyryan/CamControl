@@ -75,13 +75,14 @@ MOTION_HOT="${MOTION_HOT:-}"        # empty = auto: on for motion-only, off for
 # this is chosen automatically, so this is a ceiling and not a demand. A 1080p
 # camera stays at 1080p with the cap set here.
 #
-# 2592x1944 is the SPL6418's NATIVE sensor readout, so frames come off the
-# glass with no in-camera scaling at all. Its 4K mode is an upscale of a
-# 16:9 crop of this sensor — measured, it resolves no more detail than the
-# 1080p mode — so 4K here buys bigger files, not finer grain. The frame is
-# 4:3, the shape of the hardware. Set 3840/2160 to want the 16:9 crop anyway.
-MAX_WIDTH=2592
-MAX_HEIGHT=1944
+# Tuned to the SPL6418: the real detail lives in a 2592x1458 strip of its
+# 5MP sensor; the "4K" mode is that strip upscaled in-camera (measured: it
+# resolves no more than 1080p-class). 2560x1440 downsamples the same strip
+# instead of upsampling it — the classic 16:9 framing, every real pixel,
+# nothing invented. 2592/1944 would be the native 4:3 readout: same width
+# plus ceiling and floor. 3840/2160 is this same framing stretched.
+MAX_WIDTH=2560
+MAX_HEIGHT=1440
 
 # ffmpeg -q:v for the stills. 2 = best, 31 = worst.
 JPEG_QUALITY=2

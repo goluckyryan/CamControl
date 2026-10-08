@@ -9,8 +9,8 @@ Nothing needs installing — it uses ffmpeg, v4l2-ctl and Python 3, all already 
 
 Capture resolution is not configured per camera: `MAX_WIDTH`/`MAX_HEIGHT` in
 `config.sh` are a **ceiling**, and the largest mode at or below it is chosen. The
-shipped default is 2592x1944 — the SPL6418's native 4:3 sensor readout, because
-its 4K mode is only an in-camera upscale (see Troubleshooting) — and a 1080p
+shipped default is 2560x1440 — the largest honest 16:9 mode of the SPL6418,
+whose "4K" is only an in-camera upscale (see Troubleshooting) — and a 1080p
 camera like the C920e still shoots 1080p without changing anything.
 
 ## Quickstart
@@ -410,7 +410,7 @@ an exported variable of the same name is overwritten by the file.
 | `MOTION_WINDOW_SEC` | 600 | longest one watching stream stays open before the camera is released and reopened | — |
 | `MOTION_SETTLE_SEC` | empty | settle for a motion-triggered frame, empty = `SHOT_SETTLE_SEC` (min 2); non-hot watchers only | — |
 | **Image** | | | |
-| `MAX_WIDTH` × `MAX_HEIGHT` | 2592×1944 | **ceiling** on frame size; the largest mode at or below it is used (shipped at the SPL6418's native readout; set 3840×2160 for its upscaled 4K) | — |
+| `MAX_WIDTH` × `MAX_HEIGHT` | 2560×1440 | **ceiling** on frame size; the largest mode at or below it is used (shipped at the SPL6418's largest honest 16:9 mode; see Troubleshooting) | — |
 | `JPEG_QUALITY` | 2 | ffmpeg `-q:v` for the stills: 2 best, 31 worst | — |
 | **Camera** | | | |
 | `DEVICE` | empty | device path, ideally a `/dev/v4l/by-id/...` symlink; empty = auto-detect | `-device` |
@@ -497,13 +497,15 @@ adjust, repeat. Remember the camera snaps to its own ladder.
 upscale of a 16:9 crop of it. Measured, a 4K frame downscaled to 1080p holds
 no more real detail than the camera's own 1080p mode. Nothing is wrong with
 the settings; the pixels are UHD, the detail is 1080p-class. That is why the
-shipped `MAX_WIDTH`/`MAX_HEIGHT` sit at the native 2592×1944: full sensor,
-no in-camera rescaling, and the 4:3 shape the hardware actually is. Set them
-to 3840/2160 for the upscaled 16:9 anyway — it changes the framing, not the
-sharpness — or 2560/1440 for that same 16:9 framing in smaller files. Do not
-reach for the camera's `sharpness` control either: on this firmware it is
-inverted (0, the default, is the sharpest; raising it blurs on purpose), and
-CamControl never writes it.
+shipped `MAX_WIDTH`/`MAX_HEIGHT` sit at 2560×1440: the sensor's real 16:9
+detail lives in a ~2592x1458 strip, and 1440p **downsamples** that strip
+rather than stretching it — the same framing the 4K mode fakes, at the same
+real detail, in smaller files. The native 2592×1944 mode is the full 4:3
+readout — same horizontal view plus ceiling and floor — if you would rather
+keep the whole sensor and crop when editing. 3840×2160 remains available and
+changes nothing but file size. Do not reach for the camera's `sharpness`
+control either: on this firmware it is inverted (0, the default, is the
+sharpest; raising it blurs on purpose), and CamControl never writes it.
 
 **Changing `FIX_EXPOSURE` does nothing** — on an SPL6418 the control only moves
 the image over roughly 1..30, and is flat from there to its advertised maximum of
