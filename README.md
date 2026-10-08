@@ -491,6 +491,19 @@ missing from that list it is not enumerating: check `lsusb` for it.
 **Frames too dark or too bright** — that is `FIX_EXPOSURE`. Take a `-ss` shot,
 adjust, repeat. Remember the camera snaps to its own ladder.
 
+**4K frames that are not sharp** — the SPL6418's sensor is 5MP: the
+2592x1944 mode is its native readout, and the 3840x2160 frame is an in-camera
+upscale of a 16:9 crop of it. Measured, a 4K frame downscaled to 1080p holds
+no more real detail than the camera's own 1080p mode. Nothing is wrong with
+the settings; the pixels are UHD, the detail is 1080p-class. `2560x1440`
+gives the same real detail in smaller files; the one honest advantage of
+shooting 4K is that *you* get to choose the downscale when the video is
+built, which comes out a touch cleaner than the camera's own shrink. Do not
+reach for
+the camera's `sharpness` control either: on this firmware it is inverted
+(0, the default, is the sharpest; raising it blurs on purpose), and
+CamControl never writes it.
+
 **Changing `FIX_EXPOSURE` does nothing** — on an SPL6418 the control only moves
 the image over roughly 1..30, and is flat from there to its advertised maximum of
 12287. A value like 350 sits well inside that plateau, so large changes to it
