@@ -134,13 +134,13 @@ motion_watch() {
     cam_apply_fixed "$dev" || true
   done
 
-  # A command typed while an interactive session was opening this stream had
-  # nothing to kill: its signal arrived before there was a pid to signal, so it
-  # ended nothing and the wait below would hold the camera for the rest of the
-  # window. The pending flag is what says "someone is waiting for this window to
-  # end" — reading it here is what turns a swallowed signal into a short one.
-  if (( ${CMD_PENDING:-0} )); then
-    kill "$MOTION_PYPID" 2>/dev/null || true
+  # A signal or typed command can arrive while the two children above are still
+  # being created: the handler runs with no pid to signal, so it ends nothing —
+  # and the wait below would then hold the session (ffmpeg still holding the
+  # camera) for the rest of the window. Now that the pids exist, re-run the
+  # stop; the flags are what say "someone is waiting for this window to end".
+  if (( ${CMD_PENDING:-0} )) || (( ${STOP:-0} )); then
+    motion_stop_kill
   fi
 
   # The pids are empty when a signal handler has already reaped the watcher,

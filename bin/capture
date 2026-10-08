@@ -253,13 +253,22 @@ done
 # Detach by re-execing ourselves, then wait for the child to publish its session.
 if (( BACKGROUND )) && [[ -z "${HELIOS_DETACHED:-}" ]]; then
   before="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
-  HELIOS_DETACHED=1 setsid nohup "$0" "${ORIG_ARGS[@]}" >/dev/null 2>&1 &
+  # Whatever the child says before it can create its session log — a rejected
+  # argument, no device, no usable mode — would hit /dev/null, and the parent
+  # could only report "it did not start". Catch it in a temp file instead: the
+  # child folds it into supervisor.log, the parent prints it here.
+  early_log="$(mktemp "${TMPDIR:-/tmp}/helios-start.XXXXXX" 2>/dev/null)" || early_log="/dev/null"
+  # readlink -f because a $0 without a slash ("bash capture -b") is a PATH
+  # lookup to nohup, not the script the parent is running.
+  HELIOS_DETACHED=1 HELIOS_EARLY_LOG="$early_log" setsid nohup "$(readlink -f "$0")" "${ORIG_ARGS[@]}" >>"$early_log" 2>&1 &
   for _ in $(seq 1 50); do
     now="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
     [[ -n "$now" && "$now" != "$before" ]] && { ok "started in background: $now"; exit 0; }
     sleep 0.2
   done
-  die "background session did not start; check the newest folder under sessions/"
+  note="$(head -c 400 "$early_log" 2>/dev/null | tr '\n' ' ' || true)"
+  [[ "$early_log" != "/dev/null" ]] && rm -f "$early_log" 2>/dev/null || true
+  die "background session did not start${note:+ — it said: $note}"
 fi
 
 # --- device and mode -------------------------------------------------------
@@ -309,8 +318,16 @@ FRAMES="$SDIR/frames"
 LOG="$SDIR/capture.log"
 META="$SDIR/session.json"
 mkdir -p "$FRAMES"
-# A detached run has nowhere to print, so give it a log before it says anything.
-[[ -n "${HELIOS_DETACHED:-}" ]] && exec >>"$SDIR/supervisor.log" 2>&1
+# A detached run has nowhere to print, so give it a log before it says anything —
+# and fold in whatever it said earlier, while its only destination was the
+# parent's startup file, so one log tells the whole story.
+if [[ -n "${HELIOS_DETACHED:-}" ]]; then
+  if [[ -n "${HELIOS_EARLY_LOG:-}" && -f "${HELIOS_EARLY_LOG:-}" ]]; then
+    cat "$HELIOS_EARLY_LOG" >>"$SDIR/supervisor.log" 2>/dev/null || true
+    rm -f "$HELIOS_EARLY_LOG" 2>/dev/null || true
+  fi
+  exec >>"$SDIR/supervisor.log" 2>&1
+fi
 
 info "session   : $SID"
 info "device    : $DEV  ($CARD)"

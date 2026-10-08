@@ -33,7 +33,8 @@ fi
 
 stable="$(cam_stable_path "$best")"
 min_fps="$(min_capture_fps "$INTERVAL_SEC")"
-read -r fmt w h capfps < <(cam_formats "$best" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" "$min_fps")
+read -r fmt w h capfps < <(cam_formats "$best" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" "$min_fps") \
+  || die "no capture mode on $best fits MAX_WIDTH/MAX_HEIGHT in config.sh"
 
 ok "selected: $best"
 echo "  card          : $(cam_card "$best")"

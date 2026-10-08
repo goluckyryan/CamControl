@@ -150,6 +150,13 @@ session_is_running() {
   local dir="$1" pid
   [[ -f "$dir/capture.pid" ]] || return 1
   pid="$(cat "$dir/capture.pid" 2>/dev/null)" || return 1
-  [[ -n "$pid" ]] || return 1
-  kill -0 "$pid" 2>/dev/null
+  [[ "$pid" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Pids are recycled, and on a small board they recycle fast: without this
+  # tiebreaker a finished session can look alive forever through whatever
+  # process inherited its number, and -resume refuses to take over. When
+  # procfs cannot be read, fail open — that is what the bare kill -0 did.
+  if [[ -r "/proc/$pid/cmdline" ]]; then
+    grep -qa 'bin/capture' "/proc/$pid/cmdline" || return 1
+  fi
 }
