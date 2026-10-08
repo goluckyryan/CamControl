@@ -132,10 +132,13 @@ done
 
 need ffmpeg; need v4l2-ctl
 if [[ "$MOTION_ONLY" == "1" ]]; then
-  # No timed frames: the interval only travels into session.json, but it
-  # still has to survive the number parsing there.
-  [[ "$INTERVAL" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
-    || die "interval must be a positive number, got '$INTERVAL'"
+  # No timed frames: the interval only travels into session.json, but it has to
+  # survive the number parsing there, and it has to be more than zero. Later
+  # readers divide by it — tools/frames.py measures every gap against it — so a
+  # session that expects no cadence at all is worth refusing at the door rather
+  # than discovering that in bin/status two hours in.
+  [[ "$INTERVAL" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] && fcmp "$INTERVAL" gt 0 \
+    || die "interval must be a number greater than zero, got '$INTERVAL'"
 else
   validate_interval "$INTERVAL"
 fi
@@ -163,16 +166,23 @@ fi
 # What a knob's value has to satisfy — said once here, because the same value
 # can arrive as a flag at startup or be typed into a running session (-I), and
 # the two must not disagree about what is legal.
-sens_ok()     { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && fcmp "$1" gt 0 && fcmp "$1" le 100; }
-cooldown_ok() { [[ "$1" =~ ^[0-9]+$ ]]; }
+#
+# None of them accepts a leading zero, and that is not fussiness: cooldown and
+# quality are used inside $(( )), where bash reads 010 as octal 8 and stops dead
+# at 009 with "value too great for base". Under set -e that error ends the
+# session, and the 010 case is worse than a crash — the number typed is not the
+# number used. A value the validator blessed must mean the same thing to
+# arithmetic as it does to the person who typed it.
+sens_ok()     { [[ "$1" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] && fcmp "$1" gt 0 && fcmp "$1" le 100; }
+cooldown_ok() { [[ "$1" =~ ^(0|[1-9][0-9]*)$ ]]; }
 # 0 turns the hold off; any real hold is at least 0.1 s (below that the
 # watcher is dead time that can never pay for itself). awk, because fcmp has
 # no equality and "0.00" has to count as off.
-delay_ok()    { [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v d="$1" 'BEGIN{exit !(d==0 || d>=0.1)}'; }
-quality_ok()  { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 31 )); }
+delay_ok()    { [[ "$1" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] && awk -v d="$1" 'BEGIN{exit !(d==0 || d>=0.1)}'; }
+quality_ok()  { [[ "$1" =~ ^[1-9][0-9]*$ ]] && (( $1 >= 1 && $1 <= 31 )); }
 # Camera controls are integers; the device clamps an out-of-range value itself
 # and cam_set_checked reports that, so only the shape is checked here.
-fixed_ok()    { [[ "$1" =~ ^-?[0-9]+$ ]]; }
+fixed_ok()    { [[ "$1" =~ ^-?(0|[1-9][0-9]*)$ ]]; }
 
 if (( INTERACTIVE )) && (( BACKGROUND )); then
   # setsid + no stdin is what a detached session is; there is no terminal left
@@ -206,7 +216,6 @@ if [[ "$MOTION_ON" == "1" ]]; then
   if [[ -z "${MOTION_HOT:-}" ]]; then
     MOTION_HOT="$MOTION_ONLY"
   fi
-  [[ "$MOTION_HOT" == "auto" ]] && MOTION_HOT="$MOTION_ONLY"
   case "$MOTION_HOT" in
     0|1) ;;
     *) die "-hot/-no-hot/MOTION_HOT must be 0 or 1, got '$MOTION_HOT'" ;;
@@ -418,7 +427,15 @@ console_reader() {
       if [[ -n "$line" ]]; then
         saw_any=1
         n=$((n + 1))
-        printf '%s\n' "$line" > "$CMDDIR/$(printf '%09d' "$n")" 2>/dev/null || return 0
+        # Write where the drain cannot mistake the file for a command, then move
+        # it into place. Writing straight to the final name left an instant
+        # between the file's creation and its printf: a drain landing there read
+        # an empty line, deleted the pending command, and the words arrived on an
+        # unlinked inode. A partly written line is the same gap from the other
+        # side — 'delay 30' draining as 'delay 3'. The leading dot is what makes
+        # this safe, since drain_cmds globs "$CMDDIR"/* and dotfiles are not in it.
+        printf '%s\n' "$line" > "$CMDDIR/.next.$$" 2>/dev/null || return 0
+        mv -f "$CMDDIR/.next.$$" "$CMDDIR/$(printf '%09d' "$n")" 2>/dev/null || return 0
         kill -USR1 "$MAIN_PID" 2>/dev/null || return 0
       fi
     fi
@@ -599,6 +616,15 @@ motion_frame() {
     MOTION_HOT_DIR=""
     return 0
   fi
+  # Nothing to take: the differ said movement and the held JPEG is not there.
+  # Hand the directory back before falling through to a shot of our own — the
+  # next watch assigns MOTION_HOT_DIR again, and the old one would sit in
+  # /dev/shm, a 4K frame at a time, until the session ended.
+  if [[ -n "${MOTION_HOT_DIR:-}" ]]; then
+    rm -rf "$MOTION_HOT_DIR" 2>/dev/null || true
+    MOTION_HOT_DIR=""
+  fi
+  MOTION_HOT_FILE=""
   take_shot "$out" "$M_SETTLE"
 }
 
@@ -607,11 +633,17 @@ motion_frame() {
 # silently erase it. Step forward rather than collide.
 unique_frame_name() {
   local t i out
-  for i in 0 1 2; do
+  for i in 0 1 2 3 4 5; do
     t="$(date -d "@$(( $(date +%s) + i ))" '+%Y%m%d-%H%M%S')"
     out="$FRAMES/$t.jpg"
     [[ -e "$out" ]] || { printf '%s\n' "$out"; return 0; }
   done
+  # Cannot happen — six frames in six seconds would need one per second, and a
+  # frame costs a camera handover of its own. Said rather than silently done,
+  # because the name has to stay exactly %Y%m%d-%H%M%S.jpg: tools/frames.py
+  # skips what it cannot parse, so a suffix would make a captured frame
+  # invisible to bin/status and bin/make-movie instead of merely untidy.
+  warn "frames within six seconds of each other: about to overwrite $out"
   printf '%s\n' "$out"
 }
 
@@ -633,7 +665,8 @@ handle_cmd() {
       if take_shot "$out"; then
         SHOTS=$((SHOTS + 1)); LAST_SHOT="$now"
         # Motion-only has no schedule to leave alone; what a frame like this
-        # does there is start the cooldown, which is what stops the watcher
+        # does there is start the cooldown, and motion_loop waits that out
+        # before it opens the next window — which is what stops the watcher
         # firing again a second later on the same movement.
         if [[ "$MOTION_ONLY" == "1" ]]; then
           info "manual    : $(basename "$out")  (counts toward the cooldown)"
@@ -751,6 +784,43 @@ drain_cmds() {
   return 0
 }
 
+# The earliest time a frame may be taken, or 0 when the cooldown after the last
+# frame of any kind — scheduled, triggered, or typed by hand — is already spent.
+# Bounded by DUR_END, because a session that is due to stop stops rather than
+# finishes waiting out a cooldown first. The +2 is the camera handover, which
+# costs a second or two by itself and would otherwise let two frames land in the
+# same second.
+cooldown_end() {
+  local end
+  (( LAST_SHOT == 0 )) && { echo 0; return; }
+  end=$(( LAST_SHOT + MOTION_COOLDOWN_SEC + 2 ))
+  (( end > $(date +%s) )) || { echo 0; return; }
+  (( DUR_END > 0 && end > DUR_END )) && end=$DUR_END
+  echo "$end"
+}
+
+# Sleep in the loop's own process, where a typed command or a Ctrl-C can cut it
+# short: that is what SLEEPPID exists for, and the reason this is never called
+# inside $( ) — the pid would belong to a subshell nobody can signal. Zero or
+# negative is no sleep at all, which is also what makes a deadline that has
+# already passed harmless.
+sleep_interruptible() {
+  (( $1 > 0 )) || return 0
+  sleep "$1" & SLEEPPID=$!
+  wait "$SLEEPPID" 2>/dev/null || true
+  SLEEPPID=""
+}
+
+# The watcher came back almost as soon as it started ($1 = when the watch began).
+# Without a pause here a broken watcher would spin the camera open and closed for
+# the rest of the window. A window ended because a command or a signal arrived is
+# the one case where a fast return is expected rather than a sign of trouble.
+watch_backoff() {
+  (( $(date +%s) - $1 < 2 )) || return 0
+  (( STOP == 0 && CMD_PENDING == 0 )) || return 0
+  sleep_interruptible 5
+}
+
 # Fire on a schedule anchored to the session start, so the time each shot takes
 # cannot accumulate into drift across a multi-day run. Motion watching fills
 # the idle gaps; it never moves the anchor, so the grid is the same whether or
@@ -781,15 +851,21 @@ shot_loop() {
         watch_end=$(( target - 2 ))
         (( DUR_END > 0 && watch_end > DUR_END - 2 )) && watch_end=$(( DUR_END - 2 ))
         # One frame of any kind per cooldown window, and the handover from
-        # watcher to shot costs a second or two on its own.
-        mute=$(( LAST_SHOT + MOTION_COOLDOWN_SEC + 2 ))
-        nowt="$(date +%s)"
-        if (( mute > nowt )) && (( mute < watch_end )); then
-          sleep $(( mute - nowt )) & SLEEPPID=$!
-          wait "$SLEEPPID" 2>/dev/null || true
-          SLEEPPID=""
+        # watcher to shot costs a second or two on its own. Waiting it out is
+        # bounded by the end of the window, never the other way round: the
+        # scheduled frame keeps its own grid whatever the cooldown says. Going
+        # to that edge instead of returning at once when the cooldown runs
+        # further than the gap is also what keeps this from being a busy loop.
+        mute="$(cooldown_end)"; nowt="$(date +%s)"
+        if (( mute > 0 )); then
+          (( mute > watch_end )) && mute=$watch_end
+          sleep_interruptible $(( mute - nowt ))
         fi
-        if (( STOP == 0 )) && (( $(date +%s) < watch_end )); then
+        # What is left of the window, past the cooldown, is what is worth
+        # opening a watch for. A window that could only fire inside the
+        # cooldown would produce the one frame this rule exists to prevent.
+        if (( STOP == 0 )) && (( $(date +%s) < watch_end )) \
+           && (( $(cooldown_end) == 0 )); then
           local wrc=0 w0; w0="$(date +%s)"
           motion_watch "$DEV" "$watch_end" || wrc=$?
           if (( wrc == 0 )); then
@@ -802,24 +878,17 @@ shot_loop() {
               MISSES=$((MISSES + 1))
               warn "motion shot produced no frame — see $LOG"
             fi
-          elif (( $(date +%s) - w0 < 2 )) && (( STOP == 0 )) && (( CMD_PENDING == 0 )); then
-            # The watcher died almost as soon as it started. Without a pause
-            # here a broken watcher would spin the camera open and closed for
-            # the rest of the window. A command that interrupted the watcher is
-            # the one case where a fast return is expected, not a broken one.
-            sleep 5 & SLEEPPID=$!
-            wait "$SLEEPPID" 2>/dev/null || true
-            SLEEPPID=""
+          else
+            watch_backoff "$w0"
           fi
         fi
         (( STOP )) && break
         continue   # re-evaluate against the same target
       fi
-      if (( delay > 0 )); then
-        sleep "$delay" & SLEEPPID=$!
-        wait "$SLEEPPID" 2>/dev/null || true
-        SLEEPPID=""
-      fi
+      # The watching branch above always leaves by now; this is the plain wait
+      # of a session that is not watching between its frames. (delay > 0 is
+      # what got us into this block at all, so there is nothing left to test.)
+      sleep_interruptible "$delay"
     fi
     (( STOP )) && break
     # Woken before the target: that was a command (or the end deadline), not
@@ -854,11 +923,23 @@ motion_loop() {
     nowt="$(date +%s)"
     if (( DUR_END > 0 && nowt >= DUR_END - 3 )); then
       # Too close to the stop time to hand the camera to a watcher that
-      # would only just open; wait out the deadline.
-      sleep $(( DUR_END - nowt )) & SLEEPPID=$!
-      wait "$SLEEPPID" 2>/dev/null || true
-      SLEEPPID=""
+      # would only just open; wait out the deadline. It may have gone
+      # already — the cooldown below runs right up to the end time — and a
+      # negative sleep is what would otherwise be an error message on the
+      # terminal, so sleep_interruptible treats it as no sleep at all.
+      sleep_interruptible $(( DUR_END - nowt ))
       break
+    fi
+    # One frame of any kind per cooldown window, checked here rather than only
+    # after a frame arrives: a frame taken from the console has to hold the
+    # watcher off just as much as a triggered one, or the movement that has
+    # just crossed the frame is shot twice a couple of seconds apart. Nothing
+    # is on a schedule in this loop, so waiting the whole cooldown out is right
+    # (the timed loop above is where a grid has to survive a cooldown).
+    mute="$(cooldown_end)"
+    if (( mute > nowt )); then
+      sleep_interruptible $(( mute - nowt ))
+      continue   # re-read the deadline and anything typed during the wait
     fi
     watch_end=$(( nowt + MOTION_WINDOW_SEC ))
     (( DUR_END > 0 && watch_end > DUR_END - 3 )) && watch_end=$(( DUR_END - 3 ))
@@ -873,24 +954,14 @@ motion_loop() {
         MOTION_SHOTS=$((MOTION_SHOTS + 1))
         LAST_SHOT="$(date +%s)"
         info "motion      : $(basename "$out")"
-        mute=$(( LAST_SHOT + MOTION_COOLDOWN_SEC + 2 ))
-        nowt="$(date +%s)"
-        if (( mute > nowt )); then
-          sleep $(( mute - nowt )) & SLEEPPID=$!
-          wait "$SLEEPPID" 2>/dev/null || true
-          SLEEPPID=""
-        fi
+        # The cooldown is waited out at the top of the loop, where the deadline
+        # rule covers it and a command typed in the middle of it gets seen.
       elif (( STOP == 0 )); then
         MISSES=$((MISSES + 1))
         warn "motion shot produced no frame — see $LOG"
       fi
-    elif (( $(date +%s) - w0 < 2 )) && (( STOP == 0 )) && (( CMD_PENDING == 0 )); then
-      # The watcher died almost as soon as it started; pause, or a dead
-      # watcher would spin the camera open and closed forever. Ending a window
-      # because a command arrived is the expected case, not a broken watcher.
-      sleep 5 & SLEEPPID=$!
-      wait "$SLEEPPID" 2>/dev/null || true
-      SLEEPPID=""
+    else
+      watch_backoff "$w0"
     fi
   done
 }
