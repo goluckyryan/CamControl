@@ -82,6 +82,10 @@ if session_is_running "$SDIR"; then
   # being still; there is no expected cadence to be overdue against.
   if [[ -n "$last" && "$mtimed" == "True" ]]; then
     age=$(awk -v l="$last" 'BEGIN{printf "%.0f", systime()-l}')
-    (( age > 3 * ${iv%.*} )) && warn "last frame was ${age}s ago — expected one every ${iv}s"
+    # an if-statement, not A && B: as the script's last executed command a
+    # false test would become bin/status's own exit code.
+    if (( age > 3 * ${iv%.*} )); then
+      warn "last frame was ${age}s ago — expected one every ${iv}s"
+    fi
   fi
 fi

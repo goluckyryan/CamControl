@@ -123,8 +123,10 @@ Give `run.sh` a time with a unit — `s`, `m` or `h`:
 ./run.sh -t 5m -n                   # print the command instead of running it
 ```
 
-**Minimum 16 seconds** — twice `SHOT_SETTLE_SEC`, since each shot spends 8 s
-streaming. The default lives in `INTERVAL_SEC` in `config.sh`, and is recorded
+**Minimum 1 second** — frame filenames have one-second resolution, so anything
+faster would write two frames into the same name; under 2 s `bin/capture` warns
+that jitter could cost a frame. An interval under ~29 s also leaves no room for
+the motion watcher at all (below). The default lives in `INTERVAL_SEC` in `config.sh`, and is recorded
 in each session's `session.json`, which every other tool reads — so old
 sessions keep reporting correctly if you change the default later.
 
@@ -214,7 +216,7 @@ Things worth knowing:
   `-sensitivity 0.5` or `0.2` for a dim or distant subject carries a
   thirty-fold safety margin against noise-only triggers.
 - `session.json` records `motion: {enabled, timed, sensitivity,
-  cooldown_sec, triggered}` and `bin/status` prints a one-line summary.
+  cooldown_sec, delay_sec, triggered}` and `bin/status` prints a one-line summary.
 
 ### Motion only
 
@@ -303,7 +305,7 @@ motion-only sequences have no uniform speed to describe.
 `-name NAME`, `-b` / `-background`, `-I` / `-interactive` (see
 [Talking to a session while it runs](#talking-to-a-session-while-it-runs)),
 and `-motion` / `-motion-only` /
-`-no-motion` with `-sensitivity N` (percent, 0–100), `-cooldown N`
+`-no-motion` with `-sensitivity N` (percent, greater than 0, up to 100), `-cooldown N`
 (seconds), `-delaySec N` (save the frame N seconds after the trigger, min
 0.1), and `-hot` / `-no-hot` (save the watched frame directly, or reopen
 and settle).
@@ -387,7 +389,7 @@ an exported variable of the same name is overwritten by the file.
 | | default | meaning | flag |
 |---|---|---|---|
 | **Cadence** | | | |
-| `INTERVAL_SEC` | 300 | seconds between frames; minimum twice `SHOT_SETTLE_SEC` | `-t` in `run.sh`, `-i` in `bin/capture` |
+| `INTERVAL_SEC` | 300 | seconds between frames; minimum 1 s, see [The interval](#the-interval) | `-t` in `run.sh`, `-i` in `bin/capture` |
 | `DURATION_SEC` | 0 | stop after this long (s/m/h suffix ok); 0 = until stopped | `-duration` |
 | `SHOT_SETTLE_SEC` | 8 | streaming seconds per shot before the frame is kept | — |
 | **Motion** | | | |

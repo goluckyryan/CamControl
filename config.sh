@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# heliosMoving configuration. Every value here can also be overridden on the
-# command line; see `bin/capture -help`.
+# heliosMoving configuration. Most values also have a per-run flag; the table
+# in the README's "Every value config.sh controls" section says which, and
+# `run.sh -h` / `bin/capture -h` print the flags themselves.
 
 # --- where things go ---------------------------------------------------------
 # Folder for sessions (frames, logs, movies). Default: sessions/ in the repo.

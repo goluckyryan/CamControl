@@ -50,13 +50,20 @@ done
 [[ -n "$FOLDER" ]] || { usage; exit 1; }
 [[ -d "$FOLDER" ]] || die "'$FOLDER' is not a directory"
 FOLDER="$(readlink -f "$FOLDER")"
-awk -v f="$FPS" 'BEGIN{exit !(f>0)}' || die "-fps must be greater than zero"
+# awk's f>0 compares strings when f is a strnum, so "abc" would pass it;
+# this rig's -fps is documented as a whole number, so check it as one.
+[[ "$FPS" =~ ^(0|[1-9][0-9]*)$ ]] && (( FPS > 0 )) \
+  || die "-fps needs a whole number of frames per second, at least 1"
 
 if [[ -z "$OUT" ]]; then
   OUT="${FOLDER}.mp4"
 else
-  OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" \
+  # The directory is checked on its own: joined onto the basename in one
+  # substitution, basename's zero status would mask the failed cd and turn
+  # "/nowhere/x.mp4" into "/x.mp4" with no complaint at all.
+  outdir="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)" \
     || die "output directory for '$OUT' does not exist"
+  OUT="$outdir/$(basename "$OUT")"
 fi
 
 WORK="$(mktemp -d)"

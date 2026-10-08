@@ -31,9 +31,6 @@ Diagnostics go to stderr. The no-motion line appears only when the peak
 got within half the trigger level, so capture.log stays quiet in normal
 operation but shows how close a still scene came once something almost
 moves it.
-
-Exit 3 comes from the default SIGTERM handling; sys.exit codes only
-reach the shell for exits made here.
 """
 import sys
 import time
@@ -62,11 +59,16 @@ def pct_changed(a, b):
 def main():
     if len(sys.argv) < 5:
         sys.exit(__doc__)
-    w, h = int(sys.argv[1]), int(sys.argv[2])
-    sens = float(sys.argv[3])
-    fps = float(sys.argv[4])
-    warmup_sec = float(sys.argv[5]) if len(sys.argv) > 5 else 3.0
-    hold_sec = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
+    try:
+        w, h = int(sys.argv[1]), int(sys.argv[2])
+        sens = float(sys.argv[3])
+        fps = float(sys.argv[4])
+        warmup_sec = float(sys.argv[5]) if len(sys.argv) > 5 else 3.0
+        hold_sec = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
+    except ValueError:
+        sys.exit("WIDTH HEIGHT must be integers; SENS_PCT FPS WARMUP_SEC HOLD_SEC numbers")
+    if w <= 0 or h <= 0 or fps <= 0:
+        sys.exit("WIDTH, HEIGHT and FPS must all be positive")
 
     n = w * h
     warmup = max(1, round(fps * warmup_sec))

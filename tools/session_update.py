@@ -27,6 +27,9 @@ def typed(v):
 
 
 def main():
+    if "-h" in sys.argv[1:]:
+        print(__doc__.strip())
+        sys.exit(0)
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     path = sys.argv[1]
@@ -38,16 +41,26 @@ def main():
     while i < len(args):
         a = args[i]
         if a == "-set":
+            if i + 1 >= len(args) or "=" not in args[i + 1]:
+                sys.exit("-set needs a KEY=VALUE argument")
             k, _, v = args[i + 1].partition("=")
             # Dotted keys address nested values ("motion.triggered=3"),
             # creating intermediate objects as needed.
             node = data
             parts = k.split(".")
             for part in parts[:-1]:
-                node = node.setdefault(part, {})
+                # Stepping through a value that is not an object — data["a"]=5
+                # cannot gain an "a.b" — is a wrong key, not a corruption we
+                # should half-apply before crashing on the AttributeError.
+                nxt = node.setdefault(part, {})
+                if not isinstance(nxt, dict):
+                    sys.exit(f"cannot nest '{k}': '{part}' already holds a value")
+                node = nxt
             node[parts[-1]] = typed(v)
             i += 2
         elif a == "-controls":
+            if i + 1 >= len(args):
+                sys.exit("-controls needs a file path")
             cf = args[i + 1]
             if os.path.exists(cf):
                 with open(cf) as f:

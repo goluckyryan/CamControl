@@ -32,8 +32,15 @@ def build(frames_dir, interval):
 
 
 def main():
-    # Compared rather than prefix-filtered: "-json" is the only option here,
-    # and an interval or a directory is never going to look like it.
+    if "-h" in sys.argv[1:]:
+        print(__doc__.strip())
+        return
+    # A directory or an interval is never going to look like a flag, so
+    # anything dash-shaped that is not one of the two options in the usage
+    # line is a typo ("--json" among them) and must be named, not parsed.
+    for a in sys.argv[1:]:
+        if a.startswith("-") and a not in ("-json", "-h"):
+            sys.exit(f"unknown option: {a}\n(try -h)")
     args = [a for a in sys.argv[1:] if a != "-json"]
     if len(args) != 2:
         sys.exit(__doc__)

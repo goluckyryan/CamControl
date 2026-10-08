@@ -7,7 +7,7 @@
 #   ./run.sh -t 5m -motion     ...plus one whenever something moves
 #   ./run.sh -motion-only      nothing unless something moves
 #
-# Every flag takes a single dash, long names included: -motion, not -motion.
+# Every flag takes a single dash, long names included: -motion, not --motion.
 # Anything that is not this script's own (-t, -ss, -n, -h) is passed straight
 # through to bin/capture, so -duration, -name, -device, -b and the watcher
 # flags behave exactly as they do there (./run.sh -h groups them by mode).
@@ -137,10 +137,17 @@ done
 
 # One picture, now, with the configured parameters. No interval involved.
 if (( SINGLE )); then
+  # -t is consumed here, so bin/shot would never have said anything about it.
+  [[ -z "$TSPEC" ]] || die "-t does nothing with -ss: a single shot has no interval"
   for a in ${PASS[@]+"${PASS[@]}"}; do
     [[ "$a" == "-I" || "$a" == "-interactive" ]] &&
       die "there is nothing to talk to in a single shot: -I needs a session"
   done
+  if (( DRYRUN )); then
+    dry=("$HELIOS_ROOT/bin/shot" ${PASS[@]+"${PASS[@]}"})
+    printf '%s\n' "${dry[*]}"
+    exit 0
+  fi
   exec "$HELIOS_ROOT/bin/shot" ${PASS[@]+"${PASS[@]}"}
 fi
 

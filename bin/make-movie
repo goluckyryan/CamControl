@@ -37,6 +37,8 @@ while (( $# )); do
   esac
 done
 
+[[ "$FPS" =~ ^(0|[1-9][0-9]*)$ ]] && (( FPS > 0 )) \
+  || die "-fps needs a whole number of frames per second, at least 1"
 SDIR="$(resolve_session "$SESSION")" || die "no such session: '${SESSION:-<newest>}'"
 SID="$(basename "$SDIR")"
 [[ -d "$SDIR/frames" ]] || die "$SDIR has no frames/ directory"
@@ -70,8 +72,12 @@ if [[ -z "$OUT" ]]; then
   OUT="$SDIR/helios_${SID}.mp4"
 else
   # Resolved now, because the encode runs from inside the session directory.
-  OUT="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" \
+  # The directory is checked on its own: joined onto the basename in one
+  # substitution, basename's zero status would mask the failed cd and turn
+  # "/nowhere/x.mp4" into "/x.mp4" with no complaint at all.
+  outdir="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)" \
     || die "output directory for '$OUT' does not exist"
+  OUT="$outdir/$(basename "$OUT")"
 fi
 
 info "session   : $SID"

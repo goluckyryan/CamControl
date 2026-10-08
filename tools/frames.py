@@ -26,7 +26,14 @@ def list_frames(frames_dir):
 
 
 def find_gaps(frames, interval, factor=1.5):
-    """Runs where the spacing exceeded factor x the configured interval."""
+    """Runs where the spacing exceeded factor x the configured interval.
+
+    interval <= 0 means there is no cadence to measure against — a
+    motion-only session — which is not the same as a cadence of zero:
+    "no gaps" is the answer, and the missed-shot division below has
+    already been dodged."""
+    if interval <= 0:
+        return []
     threshold = interval * factor
     gaps = []
     for (pa, ta), (pb, tb) in zip(frames, frames[1:]):

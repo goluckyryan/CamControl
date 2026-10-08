@@ -47,7 +47,6 @@ else
   C_RED=""; C_YEL=""; C_GRN=""; C_DIM=""; C_OFF=""
 fi
 
-log()  { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 info() { printf '%s\n' "$*" >&2; }
 ok()   { printf '%s%s%s\n' "$C_GRN" "$*" "$C_OFF" >&2; }
 warn() { printf '%swarning:%s %s\n' "$C_YEL" "$C_OFF" "$*" >&2; }
@@ -107,11 +106,6 @@ check_space() {
   local dir="$1" free
   free="$(free_mb "$dir")"
   (( free >= MIN_FREE_MB )) || die "only ${free} MB free under $dir, need ${MIN_FREE_MB} MB (lower MIN_FREE_MB in config.sh to override)"
-}
-
-human_secs() {
-  local s=${1%.*}
-  printf '%dh%02dm%02ds' $((s/3600)) $(((s%3600)/60)) $((s%60))
 }
 
 # Resolve a session argument: empty/"current" -> active or newest, a name under
