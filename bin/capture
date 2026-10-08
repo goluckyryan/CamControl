@@ -418,6 +418,11 @@ start_console() {
 console_reader() {
   trap 'exit 0' TERM INT
   local n=0 rc=0 chunk raw="" line saw_any=0
+  # A console someone can type back at says so with a prompt; a pipe of
+  # scripted commands must not get '>' interleaved with the session's own
+  # output, so this is the reader's stdin — whichever one start_console
+  # handed it — doing the asking, not the parent's CONSOLE_TTY note.
+  [[ -t 0 ]] && printf '> ' >&2 || true
   while :; do
     # A timeout, not a bare read: bash does not run a trap until the builtin it
     # is sitting in returns, so a reader parked on a terminal nobody is typing
@@ -457,12 +462,19 @@ console_reader() {
       fi
     fi
     raw=""
-    (( rc == 0 )) || break          # end of input, or it went away
+    if (( rc == 0 )); then
+      # The line just ended; ask for the next one. (A blank Enter counts:
+      # it consumed the old prompt too, so the '>' has to come back.)
+      [[ -t 0 ]] && printf '> ' >&2 || true
+    else
+      break                         # end of input, or it went away
+    fi
   done
   # End of input. A terminal that went away (an ssh session that dropped) or a
   # pipe that ran out deserves a word; a session started with stdin on
   # /dev/null was never going to be typed at, so silence is kinder.
   if (( CONSOLE_TTY || saw_any )); then
+    [[ -t 0 ]] && printf '\n' >&2 || true    # step off the prompt's line first
     printf '%sconsole:%s input closed — the session runs on; Ctrl-C still stops it\n' \
       "$C_YEL" "$C_OFF" >&2
   fi

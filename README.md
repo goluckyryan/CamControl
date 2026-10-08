@@ -326,6 +326,11 @@ none of them can be switched into another. `-I` therefore stays in the
 foreground — `-b` is ignored, because a detached session has no terminal left
 to type into.
 
+While it runs, the session waits behind a `> ` prompt. It means the console
+is listening, not that the camera is free: a command is carried out at the top
+of the loop that owns the camera, so the session's own output can land before
+the prompt returns.
+
 ```sh
 ./run.sh -t 5m -I                      # frames every 5 min, and you have the wheel
 ./run.sh -motion-only -I               # nothing recorded unless something moves
