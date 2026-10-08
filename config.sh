@@ -67,15 +67,21 @@ MOTION_HOT="${MOTION_HOT:-}"        # empty = auto: on for motion-only, off for
                           # -motion. On: the watcher streams at the shot
                           # mode and keeps the newest frame's JPEG on
                           # /dev/shm, so a trigger is a file move (~0.1 s)
-                          # instead of reopen+settle; costs continuous 4K
-                          # decode/encode CPU while watching
+                          # instead of reopen+settle; costs continuous
+                          # shot-resolution CPU while watching
 
 # --- image -----------------------------------------------------------------
 # Upper bound on frame size; the largest mode the camera offers at or below
 # this is chosen automatically, so this is a ceiling and not a demand. A 1080p
 # camera stays at 1080p with the cap set here.
-MAX_WIDTH=3840
-MAX_HEIGHT=2160
+#
+# 2592x1944 is the SPL6418's NATIVE sensor readout, so frames come off the
+# glass with no in-camera scaling at all. Its 4K mode is an upscale of a
+# 16:9 crop of this sensor — measured, it resolves no more detail than the
+# 1080p mode — so 4K here buys bigger files, not finer grain. The frame is
+# 4:3, the shape of the hardware. Set 3840/2160 to want the 16:9 crop anyway.
+MAX_WIDTH=2592
+MAX_HEIGHT=1944
 
 # ffmpeg -q:v for the stills. 2 = best, 31 = worst.
 JPEG_QUALITY=2
