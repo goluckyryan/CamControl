@@ -49,6 +49,12 @@ any session — passed straight through to bin/capture
       -device PATH       capture device (default DEVICE in config.sh: empty
                          = auto-detect)
       -name NAME         session folder name (default: timestamp)
+      -4k, -2k, -1k      frame size for this run, instead of MAX_WIDTH and
+                         MAX_HEIGHT in config.sh (now ${MAX_WIDTH}x${MAX_HEIGHT}):
+                         3840x2160, 2560x1440 or 1920x1080. A ceiling, not a
+                         demand — the largest mode at or below it is used, and
+                         you are told when the camera cannot reach the number.
+                         Works with -ss too
 
 turning motion on — needs one of the first two, and MOTION=1 or MOTION_ONLY=1
 in config.sh says the same thing without a flag

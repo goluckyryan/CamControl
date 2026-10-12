@@ -97,6 +97,24 @@ validate_interval() {
   fi
 }
 
+# -4k / -2k / -1k: the MAX_WIDTH/MAX_HEIGHT ceiling, for one run, without
+# editing config.sh. They stay a ceiling and not a demand -- the largest mode at
+# or below is what gets used, exactly as the config values behave -- so a camera
+# that cannot reach the number quietly shoots its best. Quietly is wrong for a
+# flag typed this run, so res_preset_warn in lib/camera.sh says so.
+# Last one wins, as -hot/-no-hot already do.
+RES_PRESET=""          # the flag as typed; empty = the ceiling from config.sh
+
+res_preset() {
+  case "$1" in
+    -4k|-4K) MAX_WIDTH=3840; MAX_HEIGHT=2160 ;;
+    -2k|-2K) MAX_WIDTH=2560; MAX_HEIGHT=1440 ;;
+    -1k|-1K) MAX_WIDTH=1920; MAX_HEIGHT=1080 ;;
+    *)       return 1 ;;
+  esac
+  RES_PRESET="$1"
+}
+
 # Lowest capture framerate that can still feed the requested interval.
 min_capture_fps() { awk -v iv="$1" 'BEGIN{ printf "%.4f", 1.0/iv }'; }
 

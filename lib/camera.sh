@@ -70,6 +70,47 @@ cam_stable_path() {
   printf '%s\n' "$target"
 }
 
+# USB link speed in Mbps, or nothing. A 4K webcam on a High-Speed (480) link
+# advertises no 4K: the Brio drops every mode above 1080p out of
+# --list-formats-ext when it has not enumerated at SuperSpeed, which from v4l2's
+# side is indistinguishable from a camera that simply has no 4K. The bus knows,
+# so ask it. /sys/class/video4linux/videoN/device is the USB *interface*; its
+# parent is the device, which carries 'speed'.
+cam_usb_speed() {
+  local node dir
+  node="$(basename "$(readlink -f "$1")")"
+  dir="$(readlink -f "/sys/class/video4linux/$node/device" 2>/dev/null)" || return 1
+  [[ -r "$dir/../speed" ]] || return 1
+  cat "$dir/../speed" 2>/dev/null
+}
+
+# The camera's largest mode, ignoring every ceiling: FORMAT WIDTH HEIGHT FPS.
+# Same chooser the real pick uses, so it reports the mode in the same pixel
+# format and cannot disagree with it about what this camera offers.
+cam_max_mode() {
+  cam_formats "$1" | "$HELIOS_ROOT/tools/pick_format.py" 99999 99999 1
+}
+
+# Say so when -4k/-2k/-1k could not get what it asked for. Silence is the right
+# answer for the config.sh ceiling -- a 1080p camera is meant to stay at 1080p
+# without comment -- but a flag typed for this run is a request, and a -4k that
+# records 1080p otherwise looks exactly like a -4k that worked.
+res_preset_warn() {
+  local dev="$1" card="$2" w="$3" h="$4" bw bh speed
+  [[ -n "${RES_PRESET:-}" ]] || return 0
+  (( w >= MAX_WIDTH && h >= MAX_HEIGHT )) && return 0
+
+  read -r _ bw bh _ < <(cam_max_mode "$dev") || { bw="$w"; bh="$h"; }
+  warn "$RES_PRESET asked for a ${MAX_WIDTH}x${MAX_HEIGHT} ceiling, but ${card:-this camera} offers no mode above ${bw}x${bh} — recording at ${w}x${h}"
+
+  # Only when the link really is the suspect: a C920e is 1080p on any port, and
+  # telling someone to find a blue socket would send them after nothing.
+  speed="$(cam_usb_speed "$dev" || true)"
+  if [[ "$speed" =~ ^[0-9]+$ ]] && (( speed < 5000 )); then
+    warn "...and it is on a ${speed} Mbps USB 2.0 link; a 4K webcam advertises its 4K modes only on a USB 3 port, reached with a USB 3 cable"
+  fi
+}
+
 cam_ctrl_exists() { v4l2-ctl -d "$1" --list-ctrls 2>/dev/null | grep -qE "^[[:space:]]+$2 0x"; }
 
 cam_get() {

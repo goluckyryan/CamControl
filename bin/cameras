@@ -5,10 +5,22 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
 need v4l2-ctl
 
-case "${1:-}" in
-  -h|-help) echo "usage: bin/cameras   (list every video node, the choice, and why)" >&2; exit 0 ;;
-  -?*) die_opt "$1" ;;
-esac
+while (( $# )); do
+  case "$1" in
+    -h|-help)
+      cat >&2 <<USAGE
+usage: bin/cameras [-4k|-2k|-1k]   (list every video node, the choice, and why)
+
+  -4k, -2k, -1k   report the mode that frame-size ceiling would select
+                  (3840x2160, 2560x1440, 1920x1080), instead of the
+                  MAX_WIDTH/MAX_HEIGHT in config.sh — which is how to ask
+                  this camera what it can actually give you before a run
+USAGE
+      exit 0 ;;
+    -4k|-4K|-2k|-2K|-1k|-1K) res_preset "$1"; shift ;;
+    *) die_opt "$1" ;;
+  esac
+done
 
 printf '%-14s %-14s %-26s %s\n' DEVICE DRIVER CARD STATUS
 printf '%-14s %-14s %-26s %s\n' "-----" "------" "----" "------"
@@ -32,13 +44,16 @@ if [[ -z "$best" ]]; then
 fi
 
 stable="$(cam_stable_path "$best")"
+card="$(cam_card "$best")"
 min_fps="$(min_capture_fps "$INTERVAL_SEC")"
 read -r fmt w h capfps < <(cam_formats "$best" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" "$min_fps") \
-  || die "no capture mode on $best fits MAX_WIDTH/MAX_HEIGHT in config.sh"
+  || die "no capture mode on $best fits ${RES_PRESET:-MAX_WIDTH/MAX_HEIGHT in config.sh}"
 
 ok "selected: $best"
-echo "  card          : $(cam_card "$best")"
+echo "  card          : $card"
 echo "  stable path   : $stable"
-echo "  mode          : $fmt ${w}x${h} @ ${capfps} fps"
+echo "  mode          : $fmt ${w}x${h} @ ${capfps} fps${RES_PRESET:+  (ceiling $RES_PRESET)}"
 echo "  interval      : ${INTERVAL_SEC}s  (capture fps chosen as the lowest >= $(printf '%.3f' "$min_fps"))"
 echo "  rejected      : ${skipped} node(s)"
+# Last, so the mode it is talking about is already on screen above it.
+res_preset_warn "$best" "$card" "$w" "$h"

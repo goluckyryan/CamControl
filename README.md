@@ -8,8 +8,9 @@ motion-triggered frames, and the movie tools around them. The `helios_` session
 filenames are the name it was born under.
 
 Built and tested on a Raspberry Pi 5 (Debian 13) with a **Logitech C920e**, a
-**Logitech Brio 100** and a **4K SPL6418** (a Philips 4000-series unit; it
-enumerates as `XIFT SPL6418`). The full list is in [Tested cameras](#tested-cameras).
+**Logitech Brio 100**, a **Logitech Brio 4K** and a **4K SPL6418** (a Philips
+4000-series unit; it enumerates as `XIFT SPL6418`). The full list is in
+[Tested cameras](#tested-cameras).
 The only things it needs are ffmpeg, v4l2-ctl and Python 3 — see
 [Requirements](#requirements) for the packages.
 
@@ -32,6 +33,15 @@ shipped default is 2560x1440 — the largest honest 16:9 mode of the SPL6418,
 whose "4K" is only an in-camera upscale (see Troubleshooting) — and a 1080p
 camera like the C920e still shoots 1080p without changing anything.
 
+`-4k`, `-2k` and `-1k` move that ceiling for one run without editing anything:
+3840×2160, 2560×1440 or 1920×1080. They are still a ceiling and not a demand, so
+they never make a camera produce a mode it does not have — but unlike the config
+value they *say so* when the camera cannot reach the number, because a `-4k` that
+quietly recorded 1080p would look exactly like one that worked. Every tool that
+opens the camera takes them: `run.sh`, `bin/capture`, `bin/shot`, `bin/preview`,
+and `bin/cameras`, where `bin/cameras -4k` answers "what would I actually get?"
+without taking a frame.
+
 ## Tested cameras
 
 These are the cameras the rig has actually run on. Any camera auto-detects via
@@ -41,6 +51,7 @@ These are the cameras the rig has actually run on. Any camera auto-detects via
 |---|---|---|
 | Logitech C920e | 1920×1080 | clean MJPEG; full auto/manual controls |
 | Logitech Brio 100 | 1920×1080 | true 1080p; fixed focus; per-frame APP noise hushed by card name |
+| Logitech Brio 4K | 3840×2160 | `046d:085e`, card `Logitech BRIO`. Real 4K — **but only on a USB 3 port, reached with a USB 3 cable**: on a USB 2.0 link it advertises nothing above 1080p (see Troubleshooting). No APP-field noise |
 | 4K SPL6418 (Philips) | 2560×1440 | “4K” is an in-camera upscale; exposure manual-only; white balance is an index, not Kelvin |
 
 Per-camera control ranges and the silent-clamp gotcha are in
@@ -443,7 +454,7 @@ an exported variable of the same name is overwritten by the file.
 | `MOTION_WINDOW_SEC` | 600 | longest one watching stream stays open before the camera is released and reopened | — |
 | `MOTION_SETTLE_SEC` | empty | settle for a motion-triggered frame, empty = `SHOT_SETTLE_SEC` (min 2); non-hot watchers only | — |
 | **Image** | | | |
-| `MAX_WIDTH` × `MAX_HEIGHT` | 2560×1440 | **ceiling** on frame size; the largest mode at or below it is used (shipped at the SPL6418's largest honest 16:9 mode; see Troubleshooting) | — |
+| `MAX_WIDTH` × `MAX_HEIGHT` | 2560×1440 | **ceiling** on frame size; the largest mode at or below it is used (shipped at the SPL6418's largest honest 16:9 mode; see Troubleshooting) | `-4k` 3840×2160, `-2k` 2560×1440, `-1k` 1920×1080 |
 | `JPEG_QUALITY` | 2 | ffmpeg `-q:v` for the stills: 2 best, 31 worst | — |
 | **Camera** | | | |
 | `DEVICE` | empty | device path, ideally a `/dev/v4l/by-id/...` symlink; empty = auto-detect | `-device` |
@@ -524,6 +535,41 @@ missing from that list it is not enumerating: check `lsusb` for it.
 
 **Frames too dark or too bright** — that is `FIX_EXPOSURE`. Take a `-ss` shot,
 adjust, repeat. Remember the camera snaps to its own ladder.
+
+**`-4k` records 1080p / a 4K camera offers no 4K modes** — check the USB link
+before suspecting the camera. A Logitech Brio on a High-Speed (USB 2.0) link
+drops every mode above 1920×1080 out of `v4l2-ctl --list-formats-ext` entirely;
+from v4l2's side that is indistinguishable from a camera that has no 4K, which
+is why `-4k` warns with the link speed when it finds one:
+
+```
+warning: -4k asked for a 3840x2160 ceiling, but Logitech BRIO offers no mode
+  above 1920x1080 — recording at 1920x1080
+warning: ...and it is on a 480 Mbps USB 2.0 link; a 4K webcam advertises its
+  4K modes only on a USB 3 port, reached with a USB 3 cable
+```
+
+This is the camera's own doing, not the driver's: ask the device directly and
+the short mode list is right there in its USB descriptors, with no v4l2 in the
+way.
+
+```
+lsusb -v -d 046d:085e 2>/dev/null | grep bcdUSB                    # 2.10 = High Speed, 3.xx = SuperSpeed
+lsusb -v -d 046d:085e 2>/dev/null | awk '/wWidth/{w=$2} /wHeight/{print w"x"$2}' | sort -u
+```
+
+A Brio at `bcdUSB 2.10` advertises nothing above 1920x1080; at `3.xx` it adds
+2560x1440, 3840x2160 and 4096x2160. So there is no mode for any software to
+select, and no setting that recovers one.
+
+Both ends of the link matter, and the port is usually not the culprit. An xHCI
+controller exposes its High-Speed and SuperSpeed root hubs as a *pair* of buses
+(`lsusb -t`, or compare `/sys/bus/usb/devices/usb*/speed`); if the camera is on
+the 480 M bus and the matching port of its 10000 M twin is empty, that socket
+can do SuperSpeed and the link simply did not come up. Suspect, in order: a USB
+2.0 cable (no SuperSpeed pairs in it at all), a USB 2.0 hub or extension in the
+path, then a front-panel socket wired to a USB 2.0 header. Re-plug and re-run
+`bin/cameras -4k`.
 
 **4K frames that are not sharp** — the SPL6418's sensor is 5MP: the
 2592x1944 mode is its native readout, and the 3840x2160 frame is an in-camera

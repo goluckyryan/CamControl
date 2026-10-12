@@ -5,23 +5,34 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
 need ffmpeg; need v4l2-ctl
 
-case "${1:-}" in
-  -h|-help)
-    cat <<USAGE
-usage: bin/preview [out.jpg]
+OUT=""
+while (( $# )); do
+  case "$1" in
+    -h|-help)
+      cat <<USAGE
+usage: bin/preview [-4k|-2k|-1k] [out.jpg]
 
 One still on AUTO exposure/white balance, to check framing and focus.
 Default output: preview.jpg in $HELIOS_ROOT
 Unlike bin/shot this does not apply the FIX_* values — it shows what the
 camera would choose for itself.
-USAGE
-    exit 0 ;;
-  # A flag is not an output filename; say so instead of writing preview into
-  # a file called '--help'.
-  -?*) die_opt "$1" ;;
-esac
 
-OUT="${1:-$HELIOS_ROOT/preview.jpg}"
+  -4k, -2k, -1k   frame size for this preview: 3840x2160, 2560x1440 or
+                  1920x1080, instead of the MAX_WIDTH/MAX_HEIGHT in config.sh
+                  (now ${MAX_WIDTH}x${MAX_HEIGHT}). A ceiling — the largest mode at or below
+                  it is used
+USAGE
+      exit 0 ;;
+    -4k|-4K|-2k|-2K|-1k|-1K) res_preset "$1"; shift ;;
+    # A flag is not an output filename; say so instead of writing preview into
+    # a file called '--help'.
+    -?*) die_opt "$1" ;;
+    *)   [[ -z "$OUT" ]] || die "bin/preview writes one file; got both '$OUT' and '$1'"
+         OUT="$1"; shift ;;
+  esac
+done
+
+[[ -n "$OUT" ]] || OUT="$HELIOS_ROOT/preview.jpg"
 
 DEV="${DEVICE:-}"
 [[ -n "$DEV" ]] || DEV="$(cam_detect || true)"
@@ -31,6 +42,7 @@ CARD="$(cam_card "$DEV")"
 
 read -r FMT W H CAPFPS < <(cam_formats "$DEV" | "$HELIOS_ROOT/tools/pick_format.py" "$MAX_WIDTH" "$MAX_HEIGHT" 1) \
   || die "could not determine a capture mode for $DEV (raise MAX_WIDTH/MAX_HEIGHT in config.sh)"
+res_preset_warn "$DEV" "$CARD" "$W" "$H"
 case "$FMT" in
   MJPG) IFMT=mjpeg ;;
   YUYV|YUY2) IFMT=yuyv422 ;;

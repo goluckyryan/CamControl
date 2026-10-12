@@ -10,21 +10,32 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 source "$HELIOS_ROOT/lib/camera.sh"
 need ffmpeg; need v4l2-ctl
 
-case "${1:-}" in
-  -h|-help)
-    cat <<USAGE
-usage: bin/shot [out.jpg]
+OUT=""
+while (( $# )); do
+  case "$1" in
+    -h|-help)
+      cat <<USAGE
+usage: bin/shot [-4k|-2k|-1k] [out.jpg]
 
 Takes a single still with the FIX_* values from config.sh applied.
 Default output: shot-<timestamp>.jpg in $HELIOS_ROOT
-USAGE
-    exit 0 ;;
-  # An output file never starts with a dash, so a flag here is a mistake and
-  # not a filename: taking the shot into a file called '--help' would bury it.
-  -?*) die_opt "$1" ;;
-esac
 
-OUT="${1:-$HELIOS_ROOT/shot-$(date '+%Y%m%d-%H%M%S').jpg}"
+  -4k, -2k, -1k   frame size for this shot: 3840x2160, 2560x1440 or 1920x1080,
+                  instead of the MAX_WIDTH/MAX_HEIGHT in config.sh (now
+                  ${MAX_WIDTH}x${MAX_HEIGHT}). A ceiling — the largest mode at or below it
+                  is used, and the shot says so when the camera cannot reach it
+USAGE
+      exit 0 ;;
+    -4k|-4K|-2k|-2K|-1k|-1K) res_preset "$1"; shift ;;
+    # An output file never starts with a dash, so a flag here is a mistake and
+    # not a filename: taking the shot into a file called '--help' would bury it.
+    -?*) die_opt "$1" ;;
+    *)   [[ -z "$OUT" ]] || die "bin/shot writes one file; got both '$OUT' and '$1'"
+         OUT="$1"; shift ;;
+  esac
+done
+
+[[ -n "$OUT" ]] || OUT="$HELIOS_ROOT/shot-$(date '+%Y%m%d-%H%M%S').jpg"
 [[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
 [[ -d "$(dirname "$OUT")" ]] || die "no such directory: $(dirname "$OUT")"
 
@@ -48,6 +59,8 @@ for kv in "exposure=${FIX_EXPOSURE:-}" "wb=${FIX_WB:-}" "focus=${FIX_FOCUS:-}" "
 done
 info "device    : $DEV  ($CARD)"
 info "fixed     : ${SUMMARY:-none set in config.sh — the camera will meter this shot itself}"
+# After the device line, so the camera the complaint names has just been named.
+res_preset_warn "$DEV" "$CARD" "$W" "$H"
 
 TMP="$(mktemp -u "${TMPDIR:-/tmp}/helios-shot.XXXXXX").jpg"
 cleanup() { rm -f "$TMP"; }
