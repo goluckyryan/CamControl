@@ -71,9 +71,13 @@ MOTION_* values in config.sh, and these flags win for one run)
 talking to a running session (with -I)
 
   The session reads commands from stdin — type one, press enter. The mode
-  is fixed for the run; what follows changes the moment, not the plan:
+  is fixed for the run; what follows changes the moment (and the timed
+  cadence, for interval), not the mode:
 
       shot                 take a frame now
+      interval T           time between timed frames, as -t (30s, 5m, 1h;
+                           a bare number is seconds). The next frame is one
+                           new interval away; no effect under -motion-only
       delay N              motion frame delay in seconds, as -delaySec
       sens N               motion sensitivity in percent, as -sensitivity
       cooldown N           seconds between motion frames, as -cooldown
@@ -146,7 +150,9 @@ if [[ "$MOTION_ONLY" == "1" ]]; then
   [[ "$INTERVAL" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] && fcmp "$INTERVAL" gt 0 \
     || die "interval must be a number greater than zero, got '$INTERVAL'"
 else
-  validate_interval "$INTERVAL"
+  if ! INTERVAL="$(interval_secs "$INTERVAL")"; then
+    die "$INTERVAL"
+  fi
 fi
 # Same language as -t: a bare number is seconds, s/m/h suffixes allowed.
 # Rounded to whole seconds — the end deadline, motion_loop's window bound and
@@ -160,13 +166,6 @@ DURATION="$(awk -v d="$DUR_SECS" 'BEGIN{printf "%.0f", d}')"
 if [[ -n "$NAME" ]]; then
   [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
     || die "-name may contain only letters, digits, dot, dash and underscore, and must start with a letter or digit (got '$NAME')"
-fi
-
-# Each shot spends SHOT_SETTLE_SEC streaming before it keeps a frame; below
-# roughly twice that, the camera would never be switched off. With no timed
-# frames at all, there is no cadence to be too fast for.
-if [[ "$MOTION_ONLY" != "1" ]] && fcmp "$INTERVAL" lt "$((SHOT_SETTLE_SEC * 2))"; then
-  die "interval must be at least $((SHOT_SETTLE_SEC * 2))s (each shot streams ${SHOT_SETTLE_SEC}s so the fixed exposure takes hold); got ${INTERVAL}s"
 fi
 
 # What a knob's value has to satisfy — said once here, because the same value
@@ -200,6 +199,16 @@ fi
 # A watch is not worth starting if the camera has to be handed back within a
 # few seconds: opening, settling and closing cost about as much as a shot.
 MOTION_IDLE_FLOOR=$((SHOT_SETTLE_SEC + 5))
+
+# The watchable gap is what the interval leaves after a shot and its hand-back
+# margin; below the floor no window ever opens. Motion-only spends the whole
+# session watching, so the interval cannot starve it. Startup and the console
+# 'interval' command both use this.
+warn_thin_watch_window() {
+  [[ "$MOTION_ON" == "1" && "$MOTION_ONLY" != "1" ]] || return 0
+  fcmp "$INTERVAL" lt "$((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))" || return 0
+  warn "interval ${INTERVAL}s leaves no idle window to watch in (needs roughly $((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))s or more); motion frames will never fire"
+}
 
 if [[ "$MOTION_ON" == "1" ]]; then
   sens_ok "$MOTION_SENS" \
@@ -240,13 +249,7 @@ if [[ "$MOTION_ON" == "1" ]]; then
     fcmp "$M_SETTLE" ge 2 \
       || die "MOTION_SETTLE_SEC must be at least 2s (the fixed controls are written over the first ~1.5s of the stream); got ${M_SETTLE}s"
   fi
-  # The watchable gap is what the interval leaves after a shot and its
-  # hand-back margin; below the floor no window ever opens. Motion-only
-  # spends the whole session watching, so the interval cannot starve it.
-  if [[ "$MOTION_ONLY" != "1" ]] \
-     && fcmp "$INTERVAL" lt "$((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))"; then
-    warn "interval ${INTERVAL}s leaves no idle window to watch in (needs roughly $((MOTION_IDLE_FLOOR + SHOT_SETTLE_SEC + 8))s or more); motion frames will never fire"
-  fi
+  warn_thin_watch_window
 fi
 
 # What will be written to the camera on every shot, straight from config.sh.
@@ -396,6 +399,7 @@ trap on_cmd USR1
 # sorting the order they were typed in.
 CMDDIR="$SDIR/cmd"; CMD_N=0; CONSOLE_PID=""; CONSOLE_TTY=0
 NEXT_TARGET=""          # when shot_loop is due to fire next, for 'status'
+SCHED_START=0; SCHED_N=0  # the timed grid; 'interval' re-anchors both
 MAIN_PID=$$
 
 start_console() {
@@ -407,11 +411,11 @@ start_console() {
   # capture was started or redirected; otherwise the stdin capture was given,
   # so a pipe of commands (a script driving a session) still gets through.
   if { : </dev/tty; } 2>/dev/null; then
-    console_reader </dev/tty &
     CONSOLE_TTY=1
+    console_reader </dev/tty &
   elif { : <&0; } 2>/dev/null; then
+    [[ -t 0 ]] && CONSOLE_TTY=1 || CONSOLE_TTY=0
     console_reader <&0 &
-    CONSOLE_TTY=0
   else
     rmdir "$CMDDIR" 2>/dev/null || true
     die "-I has nothing to read: stdin is closed and there is no terminal"
@@ -419,18 +423,28 @@ start_console() {
   CONSOLE_PID=$!
 }
 
+# The prompt belongs after a command's answer, not before it: the reader writes
+# the line and pokes the session, but only the session knows when 'help' or a
+# shot has finished printing. Called after drain_cmds and once at startup.
+console_prompt() {
+  (( INTERACTIVE && CONSOLE_TTY )) || return 0
+  (( STOP == 0 )) || return 0
+  [[ -n "$CONSOLE_PID" ]] || return 0
+  kill -0 "$CONSOLE_PID" 2>/dev/null || return 0
+  printf '> ' >&2
+}
+
 # Writes one file per typed line, then pokes the session. Writing before the
 # signal is what makes a command impossible to miss: the loop only reads files
 # that are already there, and removes each one as it takes it.
 console_reader() {
   trap 'exit 0' TERM INT
-  local n=0 rc=0 chunk raw="" line saw_any=0
-  # A console someone can type back at says so with a prompt; a pipe of
-  # scripted commands must not get '>' interleaved with the session's own
-  # output, so this is the reader's stdin — whichever one start_console
-  # handed it — doing the asking, not the parent's CONSOLE_TTY note.
-  [[ -t 0 ]] && printf '> ' >&2 || true
+  local n=0 rc=0 chunk raw="" line saw_any=0 sent=0
+  # The session owns the prompt after a command: only it knows when 'help' or
+  # a shot has finished printing. The reader only asks again for a blank line,
+  # which never reaches the session.
   while :; do
+    sent=0
     # A timeout, not a bare read: bash does not run a trap until the builtin it
     # is sitting in returns, so a reader parked on a terminal nobody is typing
     # at would hold up 'stop' — and the EXIT trap behind it — until the input was
@@ -455,6 +469,7 @@ console_reader() {
       line="${line%"${line##*[![:space:]]}"}"
       if [[ -n "$line" ]]; then
         saw_any=1
+        sent=1
         n=$((n + 1))
         # Write where the drain cannot mistake the file for a command, then move
         # it into place. Writing straight to the final name left an instant
@@ -470,9 +485,11 @@ console_reader() {
     fi
     raw=""
     if (( rc == 0 )); then
-      # The line just ended; ask for the next one. (A blank Enter counts:
-      # it consumed the old prompt too, so the '>' has to come back.)
-      [[ -t 0 ]] && printf '> ' >&2 || true
+      if (( sent == 0 )); then
+        # A blank Enter or a comment-only line has no answer coming, so the
+        # reader is the one that has to put the prompt back.
+        [[ -t 0 ]] && printf '> ' >&2 || true
+      fi
     else
       break                         # end of input, or it went away
     fi
@@ -519,6 +536,7 @@ finalize() {
     python3 "$HELIOS_ROOT/tools/session_update.py" "$META" \
       -set "ended=$(date '+%Y-%m-%d %H:%M:%S')" \
       -set "misses=$MISSES" \
+      -set "interval_sec=$INTERVAL" \
       -set "motion.triggered=$MOTION_SHOTS" \
       -set "motion.sensitivity=$MOTION_SENS" \
       -set "motion.cooldown_sec=$MOTION_COOLDOWN_SEC" \
@@ -713,6 +731,20 @@ handle_cmd() {
         MISSES=$((MISSES + 1)); warn "manual shot produced no frame — see $LOG"
       fi ;;
 
+    interval)
+      if [[ "$MOTION_ONLY" == "1" ]]; then
+        warn "motion only: there are no timed frames, so the interval changes nothing"
+      elif ! arg="$(interval_secs "$arg")"; then
+        warn "$arg"
+      else
+        INTERVAL="$arg"
+        # n=0 is the anchor's own frame; the next one is the first new slot.
+        SCHED_START="$now"; SCHED_N=1
+        NEXT_TARGET="$(awk -v t="$now" -v i="$INTERVAL" 'BEGIN{ printf "%.0f", t + i }')"
+        info "interval  : ${INTERVAL}s from now — the next scheduled frame is one interval away"
+        warn_thin_watch_window
+      fi ;;
+
     delay)
       if (( MOTION_ON == 0 )); then
         warn "motion is off for this session; a frame delay changes nothing"
@@ -788,8 +820,62 @@ handle_cmd() {
       on_signal ;;
 
     help|'?')
-      info "commands: shot, delay N, sens N, cooldown N, quality N,"
-      info "          exposure N, wb N, focus N, gain N, more T, never, status, stop"
+      cat >&2 <<'HELP'
+
+commands — one per line, obeyed at the top of the session's loop
+
+  shot                 take a frame right now, off the schedule. The timed
+                       grid does not move, so the next scheduled frame still
+                       lands when it would have. Under -motion-only it also
+                       starts the cooldown
+  interval T           time between timed frames, as -t: a number with s, m
+                       or h (30s, 5m, 1h; a bare number is seconds). The old
+                       grid is abandoned, so the next timed frame is one new
+                       interval after this command. Under -motion-only there
+                       are no timed frames, so it changes nothing
+  delay N              seconds to keep watching after motion is seen, before
+                       the frame is saved, so a walking subject reaches the
+                       middle of the shot. 0 saves the frame that triggered;
+                       any other value is at least 0.1
+  sens N               motion sensitivity: the percent of the picture that
+                       must change to count as movement, 0 < N <= 100.
+                       Lower is more sensitive
+  cooldown N           whole seconds that must pass after any frame before
+                       the watcher may fire again, so one movement is not
+                       shot twice
+  quality N            JPEG quality of later frames, as ffmpeg's -q:v,
+                       1..31. Lower is better quality and bigger files
+  exposure N           FIX_EXPOSURE for later frames, in the camera's own
+                       units (3..2047 on a C920e, 5..2500 on a Brio 100);
+                       the camera clamps what it cannot do
+  wb N                 FIX_WB for later frames: Kelvin on most cameras
+                       (2000..6500 C920e, 2800..7500 Brio 100), but a bare
+                       1..5 index on the SPL6418
+  focus N              FIX_FOCUS for later frames, 0..250 step 5 on a C920e;
+                       ignored by a fixed-focus camera
+  gain N               FIX_GAIN for later frames, 0..255
+  more T               push the end time T later than it is now (30m, 8h);
+                       with no end time set, T counts from now
+  never                cancel the end time -duration set, so the session
+                       runs until stopped
+  status               what is running now: frames taken, the next scheduled
+                       shot (the watcher's values under -motion-only), when
+                       the session ends
+  stop                 stop the session, the same as Ctrl-C
+  help                 this list
+
+interval only means something in a timed session (plain or with -motion).
+delay, sens and cooldown only mean something while motion is on; in a plain
+timed session they are accepted and change nothing.
+
+Short forms: s = shot, sensitivity = sens, quit / q / exit = stop, ? = help.
+
+A command is obeyed at the top of the session's loop, so it can take a
+second to land. One typed while a frame is streaming waits for that frame
+to finish, 'stop' excepted. Values typed here are what session.json records
+at the end, so the movie says what the run actually used. '#' starts a
+comment, so a line can be 'delay 3  # it was too eager'.
+HELP
       ;;
 
     *)
@@ -815,6 +901,8 @@ drain_cmds() {
     [[ -n "$verb" ]] || continue
     handle_cmd "$verb" "$arg"
   done
+  # Every command's answer is on the terminal by now, so the prompt goes here.
+  console_prompt
   # A command reports its own problems; none of them are reason to end a loop
   # that has set -e behind it.
   return 0
@@ -860,12 +948,14 @@ watch_backoff() {
 # Fire on a schedule anchored to the session start, so the time each shot takes
 # cannot accumulate into drift across a multi-day run. Motion watching fills
 # the idle gaps; it never moves the anchor, so the grid is the same whether or
-# not anything moves.
+# not anything moves. A typed 'interval' is the one thing that moves it: the
+# new cadence starts over from the moment the command lands.
 shot_loop() {
-  local n=0 start target now delay out watch_end mute nowt
-  start="$(date +%s)"
+  local target now delay out watch_end mute nowt
+  SCHED_START="$(date +%s)"
+  SCHED_N=0
   while (( STOP == 0 )); do
-    target="$(awk -v s="$start" -v n="$n" -v i="$INTERVAL" 'BEGIN{ printf "%.0f", s + n * i }')"
+    target="$(awk -v s="$SCHED_START" -v n="$SCHED_N" -v i="$INTERVAL" 'BEGIN{ printf "%.0f", s + n * i }')"
     NEXT_TARGET="$target"
     now="$(date +%s)"
     # Whatever a command changed — a frame taken, an end time moved — belongs
@@ -938,9 +1028,9 @@ shot_loop() {
       LAST_SHOT="$(date +%s)"
     elif (( STOP == 0 )); then
       MISSES=$((MISSES + 1))
-      warn "shot $((n + 1)) produced no frame — see $LOG"
+      warn "shot $((SCHED_N + 1)) produced no frame — see $LOG"
     fi
-    n=$(( n + 1 ))
+    SCHED_N=$(( SCHED_N + 1 ))
   done
 }
 
@@ -1013,6 +1103,7 @@ write_fixed_controls
 if (( INTERACTIVE )); then
   start_console
   info "console   : type a command and press enter ('help' lists them, Ctrl-C stops)"
+  console_prompt
 fi
 if [[ "$MOTION_ONLY" == "1" ]]; then
   motion_loop

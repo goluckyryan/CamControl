@@ -97,6 +97,36 @@ validate_interval() {
   fi
 }
 
+# Parse a time spec for a session with timed frames. Prints the normalized
+# seconds on success; on failure prints why and returns 1, so startup can die
+# and the console 'interval' command can warn without ending the session.
+# Both go through the same rules: the time language of -t, more than zero,
+# and enough room for each shot's SHOT_SETTLE_SEC of streaming.
+interval_secs() {
+  local secs
+  if ! secs="$(to_seconds "$1" 2>/dev/null)"; then
+    printf "cannot read '%s' as a time: use a number with s, m or h (e.g. 10s, 11m, 1h)\n" "$1"
+    return 1
+  fi
+  if ! fcmp "$secs" gt 0; then
+    printf 'interval must be greater than zero\n'
+    return 1
+  fi
+  if ! fcmp "$secs" ge 1; then
+    printf 'interval must be at least 1 second (frame filenames have one-second resolution, so a shorter interval would overwrite frames); got %ss\n' "$secs"
+    return 1
+  fi
+  if ! fcmp "$secs" ge "$((SHOT_SETTLE_SEC * 2))"; then
+    printf 'interval must be at least %ss (each shot streams %ss so the fixed exposure takes hold); got %ss\n' \
+      "$((SHOT_SETTLE_SEC * 2))" "$SHOT_SETTLE_SEC" "$secs"
+    return 1
+  fi
+  if fcmp "$secs" lt 2; then
+    warn "interval ${secs}s is close to the 1s filename resolution; timing jitter could put two frames in the same second and lose one"
+  fi
+  printf '%s\n' "$secs"
+}
+
 # -4k / -2k / -1k: the MAX_WIDTH/MAX_HEIGHT ceiling, for one run, without
 # editing config.sh. They stay a ceiling and not a demand -- the largest mode at
 # or below is what gets used, exactly as the config values behave -- so a camera

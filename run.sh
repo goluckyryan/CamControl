@@ -42,8 +42,8 @@ any session — passed straight through to bin/capture
 
   -b, -background        detach and return immediately (stop with bin/stop)
   -I, -interactive       type commands at the running session: a frame on
-                         demand, new watcher values, a longer end time.
-                         Stays in the foreground, so -b is ignored
+                         demand, a new interval, new watcher values, a longer
+                         end time. Stays in the foreground, so -b is ignored
   -d, -duration N        stop after N: 90, 30m, 8h (a bare number is seconds;
                          default DURATION_SEC in config.sh = until stopped)
       -device PATH       capture device (default DEVICE in config.sh: empty
@@ -103,7 +103,8 @@ examples:
   ./run.sh -t 10s                        a frame every ten seconds
   ./run.sh -t 1h -duration 8h            hourly, for eight hours
   ./run.sh -t 30s -b                     every thirty seconds, in the background
-  ./run.sh -t 5m -I                      ...and type 'shot' at it whenever
+  ./run.sh -t 5m -I                      ...and type 'shot' or 'interval 30s'
+                                         at it whenever
 
   # timed frames, plus one on movement
   ./run.sh -t 5m -motion                 watch between the scheduled frames

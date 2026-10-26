@@ -384,6 +384,7 @@ the prompt returns.
 | command | what it does |
 |---|---|
 | `shot` | take a frame now |
+| `interval T` | time between timed frames, as `-t` (`30s`, `5m`, `1h`); the next frame is one new interval later. No effect under `-motion-only` |
 | `delay N` | motion hold, as `-delaySec` |
 | `sens N` | motion sensitivity, as `-sensitivity` |
 | `cooldown N` | motion spacing, as `-cooldown` |
@@ -397,7 +398,7 @@ the prompt returns.
 Type `help` for that list. `#` starts a comment, so a line can be
 `delay 3  # it was too eager`.
 
-Two things about the timing are worth knowing, both because the camera can
+Three things about the timing are worth knowing, all because the camera can
 only be held by one thing at a time:
 
 A **`shot` lands on the schedule, it does not become the schedule.** In a timed
@@ -406,18 +407,26 @@ past does not move the 5-minute frame; in a motion-only run there is no grid to
 disturb. Either way it counts as a frame for the cooldown, which is what keeps
 the watcher from firing again a second later on the same movement.
 
+An **`interval T` re-times the grid from the moment it lands.** The old anchor
+is abandoned, so the next timed frame is `T` after the command rather than a
+target computed from the session start. That keeps a shorter interval from
+firing an immediate catch-up frame and a longer one from leaving a stale gap.
+Under `-motion-only` there is no grid, so the command only warns.
+
 A **watcher value takes effect one window later**, so ending the window in
 progress is the cheapest way to make that "later" mean now. You pay a camera
 reopen — the same handover that happens at every window boundary anyway. A
 frame already streaming is never thrown away: `status` while a shot is in
 flight waits for it, because the alternative is losing a frame to a question.
 
-`quality` and the `FIX_*` commands change how later frames look, so a session
-driven that way is deliberately not uniform end to end. Whatever the session
-ended up using is what `session.json` records — retuned values overwrite the
-ones at startup, and a run extended with `more` records the longer duration —
-so the movie and `bin/status` describe the frames you have rather than the
-plan you started with.
+`quality`, `interval` and the `FIX_*` commands change what comes after them, so
+a session driven that way is deliberately not uniform end to end. Whatever the
+session ended up using is what `session.json` records — retuned values
+overwrite the ones at startup, and a run extended with `more` records the
+longer duration — so the movie and `bin/status` describe the frames you have
+rather than the plan you started with. (`tools/frames.py` measures gaps against
+the one interval recorded at the end, so a cadence changed mid-run makes that
+report approximate across the change.)
 
 The commands go through a folder of one-line files under the session
 (`cmd/`), not a pipe the session polls: the process spends its waiting time
@@ -439,7 +448,7 @@ an exported variable of the same name is overwritten by the file.
 | | default | meaning | flag |
 |---|---|---|---|
 | **Cadence** | | | |
-| `INTERVAL_SEC` | 300 | seconds between frames; minimum 1 s, see [The interval](#the-interval) | `-t` in `run.sh`, `-i` in `bin/capture` |
+| `INTERVAL_SEC` | 300 | seconds between frames; minimum 1 s, see [The interval](#the-interval) | `-t` in `run.sh`, `-i` in `bin/capture`, `interval` in a running `-I` session |
 | `DURATION_SEC` | 0 | stop after this long (s/m/h suffix ok); 0 = until stopped | `-duration` |
 | `SHOT_SETTLE_SEC` | 8 | streaming seconds per shot before the frame is kept | — |
 | **Motion** | | | |

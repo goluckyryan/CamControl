@@ -450,8 +450,8 @@ our flags.
 `-I` (`-interactive`) reads commands from the terminal while a session runs.
 The mode is fixed for the whole run — timed, motion and motion-only each decide
 their own cadence and none can be switched into another — so what it can change
-is the tuning: `shot`, `delay`, `sens`, `cooldown`, `quality`, the `FIX_*`
-values, `more T` and `never` for the end time, `status`, `stop`.
+is the tuning: `shot`, `interval T`, `delay`, `sens`, `cooldown`, `quality`,
+the `FIX_*` values, `more T` and `never` for the end time, `status`, `stop`.
 
 The shape of it is one file per typed command in `<session>/cmd/`, named by a
 counter, and a `SIGUSR1` to the session. Not a pipe the session polls, because
